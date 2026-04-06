@@ -1,286 +1,130 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
-
-from ta.trend import ADXIndicator
+import pandas as pd
 from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands, AverageTrueRange
+from ta.trend import ADXIndicator
+from ta.volatility import BollingerBands
 
-st.set_page_config(page_title="Strategy Finder Pro", layout="centered")
+st.title("📊 Options Exit Strategy Engine (Pro)")
 
-# ----------------- DATA -----------------
+# ---------------- INPUTS ----------------
 
-@st.cache_data
-def load_universe():
-    url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
-    df = pd.read_csv(url)
+symbol = st.text_input("Stock Symbol", value="AAPL")
 
-    sp500 = df["Symbol"].tolist()
+entry_price = st.number_input("Entry Price (Spread Cost)", value=3.40)
+current_spread = st.number_input("Current Spread Value", value=3.70)
 
-    etfs = [
-        "SPY","QQQ","IWM","DIA","VTI","VOO","IVV",
-        "XLF","XLK","XLE","XLV","XLI","XLP","XLU","XLY","XLB","XLRE","XLC",
-        "ARKK","ARKG","SMH","SOXX","XBI","EEM","GLD","SLV","TLT"
-    ]
+strike_price = st.number_input("Strike Price", value=100.0)
+days_to_expiry = st.number_input("Days to Short Expiry", value=10)
 
-    return list(set(sp500 + etfs))
+target_profit = st.number_input("Target Profit %", value=25)
 
+# ---------------- DATA ----------------
 
-@st.cache_data
-def get_data(ticker):
+def safe_float(val):
     try:
-        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
-        if df is None or df.empty:
-            return None
-        return df
-    except Exception as e:
-        print(f"{ticker} download error: {e}")
+        if isinstance(val, pd.Series):
+            return float(val.iloc[0])
+        return float(val)
+    except:
         return None
 
+try:
+    data = yf.download(symbol, period="3mo", interval="1d")
 
-# ----------------- INDICATORS -----------------
+    if data is None or data.empty or len(data) < 50:
+        st.error("Not enough data.")
+        st.stop()
 
-def compute_indicators(df):
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
 
-    if df is None or df.empty or len(df) < 50:
-        return None
+    data = data.dropna()
 
-    df = df.copy()
+    close = data["Close"]
+    high = data["High"]
+    low = data["Low"]
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    # ---------------- INDICATORS ----------------
 
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-
-    df["RSI"] = RSIIndicator(close=close).rsi()
-    df["ADX"] = ADXIndicator(high=high, low=low, close=close).adx()
-    df["ATR"] = AverageTrueRange(high=high, low=low, close=close).average_true_range()
+    data["RSI"] = RSIIndicator(close=close).rsi()
+    data["ADX"] = ADXIndicator(high=high, low=low, close=close).adx()
 
     bb = BollingerBands(close=close)
-    df["BB_High"] = bb.bollinger_hband()
-    df["BB_Low"] = bb.bollinger_lband()
+    data["BB_High"] = bb.bollinger_hband()
+    data["BB_Low"] = bb.bollinger_lband()
 
-    # Moving averages (better than VWAP on daily)
-    df["SMA20"] = close.rolling(20).mean()
-    df["SMA50"] = close.rolling(50).mean()
+    # ---------------- LAST VALUES ----------------
 
-    return df.dropna()
+    last = data.iloc[-1]
 
+    current_price = safe_float(last["Close"])
+    rsi = safe_float(last["RSI"])
+    adx = safe_float(last["ADX"])
+    bb_low = safe_float(last["BB_Low"])
+    bb_high = safe_float(last["BB_High"])
 
-# ----------------- STRATEGY ENGINE -----------------
+    # ---------------- CALCULATIONS ----------------
 
-def classify_market(price, rsi, adx, atr, sma20, sma50, bb_low, bb_high):
+    profit_pct = ((current_spread - entry_price) / entry_price) * 100
+    distance = abs(current_price - strike_price)
 
-    atr_pct = (atr / price) * 100
-    sma_drift = abs(price - sma20) / price
-
-    # BB position
     if bb_high - bb_low == 0:
-        bb_pos = 0.5
+        bb_position = 0.5
     else:
-        bb_pos = (price - bb_low) / (bb_high - bb_low)
+        bb_position = (current_price - bb_low) / (bb_high - bb_low)
 
-    # -------- BIAS --------
-    if price > sma20 > sma50:
-        bias = "STRONG BULLISH"
-    elif price > sma20:
-        bias = "BULLISH"
-    elif price < sma20 < sma50:
-        bias = "STRONG BEARISH"
-    elif price < sma20:
-        bias = "BEARISH"
-    else:
-        bias = "NEUTRAL"
+    # ---------------- EXIT ENGINE ----------------
 
-    # -------- REGIME --------
-    if adx < 20:
-        regime = "RANGE"
+    action = "MONITOR"
+
+    # 1️⃣ PROFIT FIRST (priority)
+    if profit_pct >= target_profit:
+        action = "✅ EXIT — Target Hit"
+
+    # 2️⃣ HARD RISK CONTROL
+    elif profit_pct <= -40:
+        action = "⛔ EXIT — Max Loss Hit"
+
+    # 3️⃣ TREND BREAK (VERY IMPORTANT)
     elif adx > 25:
-        regime = "TREND"
-    else:
-        regime = "MIXED"
+        action = "⚠️ EXIT — Trend Forming (ADX)"
 
-    # -------- STRATEGIES --------
-    strategies = []
-    risk = None
-    score = 0
+    # 4️⃣ MOMENTUM SHIFT
+    elif rsi < 40 or rsi > 60:
+        action = "⚠️ EXIT — Momentum Break (RSI)"
 
-    # 🎯 LOW RISK RANGE (A+)
-    if (
-        40 <= rsi <= 60 and
-        adx < 25 and
-        sma_drift <= 0.01 and
-        0.4 <= bb_pos <= 0.6 and
-        atr_pct <= 2.5
-    ):
-        strategies = ["Calendars", "Iron Condor", "Butterfly"]
-        risk = "LOW RISK"
-        score = 3
+    # 5️⃣ RANGE BREAK
+    elif bb_position < 0.3 or bb_position > 0.7:
+        action = "⚠️ EXIT — Range Breakdown (BB)"
 
-    # ⚖️ MODERATE RANGE
-    elif adx < 30:
-        strategies = ["Wide Iron Condor", "Credit Spreads", "Jade Lizard"]
-        risk = "MODERATE"
-        score = 2
+    # 6️⃣ TIME DECAY
+    elif days_to_expiry <= 5:
+        action = "⏳ EXIT — Theta Captured"
 
-    # 🔥 TREND PLAYS
-    if regime == "TREND":
-        if "BULLISH" in bias:
-            strategies += ["Bull Put Spread", "Call Debit Spread"]
-        elif "BEARISH" in bias:
-            strategies += ["Bear Call Spread", "Put Debit Spread"]
+    # 7️⃣ IDEAL HOLD ZONE
+    elif 10 <= profit_pct < target_profit and 0.4 <= bb_position <= 0.6:
+        action = "🎯 HOLD — Ideal Zone"
 
-        risk = "TREND TRADE"
-        score = max(score, 2)
+    # 8️⃣ ROLL LOGIC
+    elif days_to_expiry <= 7 and 0.4 <= bb_position <= 0.6:
+        action = "🔄 ROLL — Maintain Position"
 
-    strategies = list(set(strategies))
+    # ---------------- DISPLAY ----------------
 
-    # -------- CONFIDENCE --------
-    if score == 3:
-        confidence = "A+"
-    elif score == 2:
-        confidence = "B"
-    else:
-        confidence = "C"
+    st.subheader("📈 Market State")
+    st.write(f"Price: {current_price:.2f}")
+    st.write(f"RSI: {rsi:.1f}")
+    st.write(f"ADX: {adx:.1f}")
+    st.write(f"BB Position: {bb_position:.2f}")
 
-    return {
-        "risk": risk,
-        "strategies": strategies,
-        "bb_pos": bb_pos,
-        "atr_pct": atr_pct,
-        "sma_drift": sma_drift,
-        "bias": bias,
-        "regime": regime,
-        "confidence": confidence
-    }
+    st.subheader("📊 Trade Metrics")
+    st.write(f"Profit: {profit_pct:.2f}%")
+    st.write(f"Distance from Strike: {distance:.2f}")
+    st.write(f"Days to Expiry: {days_to_expiry}")
 
+    st.subheader("🚦 Recommended Action")
+    st.success(action)
 
-# ----------------- SCANNER -----------------
-
-def scan_universe(tickers, progress_bar, status_text, counter_text):
-
-    results = []
-    total = len(tickers)
-
-    for i, ticker in enumerate(tickers):
-
-        counter_text.markdown(f"### Scanned: {i+1} / {total}")
-        status_text.text(f"Scanning {ticker}")
-
-        try:
-            df = get_data(ticker)
-            df = compute_indicators(df)
-
-            if df is None:
-                continue
-
-            last = df.iloc[-1]
-
-            data = classify_market(
-                last["Close"],
-                last["RSI"],
-                last["ADX"],
-                last["ATR"],
-                last["SMA20"],
-                last["SMA50"],
-                last["BB_Low"],
-                last["BB_High"]
-            )
-
-            if data["risk"]:
-                results.append({
-                    "Ticker": ticker,
-                    "Price": round(last["Close"], 2),
-                    "RSI": round(last["RSI"], 1),
-                    "ADX": round(last["ADX"], 1),
-                    "ATR %": round(data["atr_pct"], 2),
-                    "BB Pos": round(data["bb_pos"], 2),
-                    "Bias": data["bias"],
-                    "Regime": data["regime"],
-                    "Confidence": data["confidence"],
-                    "Risk": data["risk"],
-                    "Strategies": ", ".join(data["strategies"])
-                })
-
-        except Exception as e:
-            print(f"{ticker} failed: {e}")
-
-        progress_bar.progress((i + 1) / total)
-
-    status_text.text("Scan complete ✅")
-    return pd.DataFrame(results)
-
-
-# ----------------- UI -----------------
-
-st.title("🧠 Strategy Finder PRO")
-
-mode = st.radio("Mode", ["Scan Universe", "Single Ticker"])
-
-# ----------------- SCAN -----------------
-
-if mode == "Scan Universe":
-
-    if st.button("Run Scan"):
-
-        tickers = load_universe()
-
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        counter_text = st.empty()
-
-        with st.spinner("Scanning market..."):
-            df_results = scan_universe(tickers, progress_bar, status_text, counter_text)
-
-        if df_results.empty:
-            st.warning("❌ No setups found")
-        else:
-            df_results = df_results.sort_values(by=["Confidence", "ATR %"], ascending=[True, True])
-
-            st.subheader("📊 Opportunities")
-            st.dataframe(df_results, use_container_width=True)
-
-            st.session_state["results"] = df_results
-
-# ----------------- SINGLE -----------------
-
-if mode == "Single Ticker":
-
-    ticker = st.text_input("Enter Ticker", value="SPY").upper()
-
-    if st.button("Analyze"):
-
-        df = compute_indicators(get_data(ticker))
-
-        if df is None:
-            st.error("No data found")
-        else:
-            last = df.iloc[-1]
-
-            data = classify_market(
-                last["Close"],
-                last["RSI"],
-                last["ADX"],
-                last["ATR"],
-                last["SMA20"],
-                last["SMA50"],
-                last["BB_Low"],
-                last["BB_High"]
-            )
-
-            st.subheader(f"{ticker} — {last['Close']:.2f}")
-
-            st.write(f"**Bias:** {data['bias']}")
-            st.write(f"**Regime:** {data['regime']}")
-            st.write(f"**Confidence:** {data['confidence']}")
-
-            st.write(f"RSI: {last['RSI']:.1f}")
-            st.write(f"ADX: {last['ADX']:.1f}")
-            st.write(f"ATR %: {data['atr_pct']:.2f}%")
-
-            st.subheader("Strategies")
-
-            for s in data["strategies"]:
-                st.write(f"• {s}")
+except Exception as e:
+    st.error(f"Error fetching data: {e}")
