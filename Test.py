@@ -9,7 +9,7 @@ from ta.volatility import BollingerBands
 
 st.set_page_config(page_title="Options Strategy Dashboard", layout="wide")
 
-st.title("📊 Options Strategy Dashboard (Scanner + Analyzer + Tracker)")
+st.title("📊 Options Strategy Dashboard")
 
 # ---------------- SAFE FLOAT ----------------
 
@@ -21,28 +21,44 @@ def safe_float(val):
     except:
         return None
 
-# ---------------- LOAD S&P 500 ----------------
+# ---------------- LARGE UNIVERSE ----------------
 
 @st.cache_data
-def load_sp500_tickers():
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url)
-    df = tables[0]
-    return df["Symbol"].tolist()
+def load_large_universe():
+    return [
+        "SPY","QQQ","IWM","DIA","VTI","VOO","IVV",
+        "XLF","XLK","XLE","XLV","XLI","XLP","XLU","XLY","XLB","XLRE","XLC",
+        "SMH","SOXX","ARKK","ARKG","XBI","EEM","GLD","SLV","TLT",
+        "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA",
+        "AVGO","NFLX","AMD","INTC","CRM","ORCL","ADBE","CSCO","NOW",
+        "JPM","BAC","GS","MS","C","WFC","SCHW","BLK","USB","PNC",
+        "WMT","COST","HD","LOW","NKE","SBUX","MCD","TGT","DG",
+        "JNJ","UNH","PFE","MRK","ABBV","TMO","DHR","ABT","LLY","BMY",
+        "XOM","CVX","COP","EOG","SLB","OXY","PSX","KMI",
+        "CAT","DE","HON","UPS","UNP","GE","RTX","LMT","BA",
+        "NEE","DUK","SO","AEP","EXC","XEL",
+        "VZ","T","TMUS",
+        "PG","KO","PEP","PM","MO","KHC","CL",
+        "O","PLD","AMT","CCI","EQIX","PSA","SPG","WELL","DLR",
+        "PLTR","COIN","RIOT","MARA","SOFI","SHOP","SQ","ROKU","UBER","LYFT"
+    ]
 
-# ---------------- GET DATA ----------------
+# ---------------- DATA ----------------
 
 @st.cache_data
 def get_data(symbol):
-    df = yf.download(symbol, period="6mo", interval="1d", progress=False)
-    if df is None or df.empty:
+    try:
+        df = yf.download(symbol, period="6mo", interval="1d", progress=False, threads=False)
+        if df is None or df.empty:
+            return None
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df = df.dropna()
+        return df
+    except:
         return None
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df = df.dropna()
-    return df
 
 # ---------------- INDICATORS ----------------
 
@@ -105,7 +121,7 @@ def plot_chart(df, symbol):
     plt.legend()
     st.pyplot(plt)
 
-# ---------------- SESSION STATE ----------------
+# ---------------- SESSION ----------------
 
 if "trades" not in st.session_state:
     st.session_state["trades"] = []
@@ -121,23 +137,23 @@ tab1, tab2, tab3 = st.tabs(["🔍 Scanner", "📈 Analyzer", "📌 Trades"])
 
 with tab1:
 
-    st.subheader("S&P 500 Scanner")
+    st.subheader("Large Universe Scanner")
 
     if st.button("Run Scan"):
 
-        tickers = load_sp500_tickers()
+        tickers = load_large_universe()
 
         progress_bar = st.progress(0)
-        status_text = st.empty()
+        status = st.empty()
 
         results = []
 
         for i, ticker in enumerate(tickers):
 
-            status_text.write(f"Scanning {ticker} ({i+1}/{len(tickers)})")
+            status.write(f"Scanning {ticker} ({i+1}/{len(tickers)})")
 
             df = get_data(ticker)
-            if df is None:
+            if df is None or len(df) < 50:
                 continue
 
             df = add_indicators(df)
@@ -164,24 +180,32 @@ with tab1:
         if results:
             df_results = pd.DataFrame(results)
             st.session_state["scan_results"] = df_results
+
+            st.success(f"✅ Scanned {len(tickers)} tickers | Found {len(df_results)} setups")
             st.dataframe(df_results)
 
-    # Select ticker from results
+        else:
+            st.warning("No setups found")
+
+    # Select ticker
     if not st.session_state["scan_results"].empty:
+
         selected = st.selectbox(
-            "Select ticker for analysis",
+            "Select ticker to analyze",
             st.session_state["scan_results"]["Ticker"]
         )
 
-        if st.button("Analyze Selected"):
+        if st.button("Send to Analyzer"):
             st.session_state["selected_ticker"] = selected
-            st.success(f"{selected} loaded into Analyzer tab")
+            st.success(f"{selected} sent to Analyzer")
 
-    # Top 5 auto analyze
+    # Top 5
     if st.button("Analyze Top 5") and not st.session_state["scan_results"].empty:
+
         top5 = st.session_state["scan_results"].head(5)
 
         for ticker in top5["Ticker"]:
+
             st.subheader(f"🔍 {ticker}")
 
             df = get_data(ticker)
@@ -240,7 +264,7 @@ with tab2:
             price, rsi, adx, bb_low, bb_high, profit_pct, days_to_expiry
         )
 
-        st.subheader("📊 Metrics")
+        st.subheader("Metrics")
         st.write(f"Price: {price}")
         st.write(f"RSI: {rsi}")
         st.write(f"ADX: {adx}")
@@ -252,14 +276,14 @@ with tab2:
         else:
             st.success(action)
 
-        st.subheader("📈 Chart")
+        st.subheader("Chart")
         plot_chart(df, symbol)
 
 # ================= TRADES =================
 
 with tab3:
 
-    st.subheader("📌 Trade Tracker")
+    st.subheader("Trade Tracker")
 
     trade_symbol = st.text_input("Ticker")
     entry = st.number_input("Entry Price", value=0.0)
@@ -272,6 +296,7 @@ with tab3:
 
     if st.session_state["trades"]:
         for trade in st.session_state["trades"]:
+
             df = get_data(trade["Ticker"])
             if df is None:
                 continue
@@ -282,4 +307,4 @@ with tab3:
             st.write(f"{trade['Ticker']} | Entry: {trade['Entry']} | P&L: {pnl:.2f}%")
 
             if pnl < -40:
-                st.error("⚠️ Risk alert")
+                st.error("⚠️ Risk Alert")
