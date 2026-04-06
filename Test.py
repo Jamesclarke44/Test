@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
-import time
 
 from ta.momentum import RSIIndicator
 from ta.trend import ADXIndicator
@@ -10,7 +9,7 @@ from ta.volatility import BollingerBands
 
 st.set_page_config(page_title="Options Strategy Engine", layout="wide")
 
-st.title("🧠 Options Strategy Engine (Scanner + AI Logic)")
+st.title("🧠 Options Strategy Engine (AI Regime + Scoring)")
 
 # ---------------- SAFE FLOAT ----------------
 def safe_float(val):
@@ -59,41 +58,81 @@ def add_indicators(df):
     df["BB_High"] = bb.bollinger_hband()
     df["BB_Low"] = bb.bollinger_lband()
 
+    df = df.dropna()
     return df
 
+# ---------------- REGIME ----------------
+def detect_regime(adx, bb_position, rsi):
+    if adx > 25:
+        return "TREND"
+    elif 0.4 <= bb_position <= 0.6 and 40 <= rsi <= 60:
+        return "RANGE"
+    else:
+        return "TRANSITION"
+
+# ---------------- SCORING ----------------
+def calculate_score(rsi, adx, bb_position):
+    score = 0
+
+    if 40 <= rsi <= 60:
+        score += 2
+    elif 35 <= rsi <= 65:
+        score += 1
+
+    if adx < 20:
+        score += 3
+    elif adx < 25:
+        score += 1
+
+    if 0.4 <= bb_position <= 0.6:
+        score += 2
+    elif 0.3 <= bb_position <= 0.7:
+        score += 1
+
+    return score
+
+# ---------------- BIAS ----------------
+def get_bias(rsi, adx):
+    if adx > 25:
+        if rsi > 55:
+            return "BULLISH"
+        elif rsi < 45:
+            return "BEARISH"
+    return "NEUTRAL"
+
 # ---------------- STRATEGY ENGINE ----------------
-def recommend_strategy(rsi, adx, bb_position):
+def recommend_strategy(score, regime, rsi, bb_position):
 
-    # LOW RISK FIRST
-    if adx < 20 and 0.45 <= bb_position <= 0.55:
-        return "🟢 Single Calendar", "LOW RISK"
+    if regime == "RANGE" and score >= 6:
+        return "Iron Condor", "LOW RISK"
 
-    if adx < 20 and 0.4 <= bb_position <= 0.6:
-        return "🟢 Double Calendar", "LOW RISK"
+    if regime == "RANGE" and score >= 5:
+        return "Double Calendar", "LOW RISK"
 
-    if adx < 22 and 0.35 <= bb_position <= 0.65:
-        return "🟢 Broken Wing Butterfly", "LOW RISK"
+    if regime == "RANGE":
+        return "Broken Wing Butterfly", "LOW-MODERATE"
 
-    # MODERATE RISK
-    if adx < 25 and 0.3 <= bb_position <= 0.7:
-        return "🟡 Wide Iron Condor", "MODERATE"
+    if regime == "TREND":
+        if rsi > 55:
+            return "Bull Put Spread", "TREND"
+        elif rsi < 45:
+            return "Bear Call Spread", "TREND"
+        else:
+            return "Credit Spread", "TREND"
 
-    if adx < 25:
-        return "🟡 Jade Lizard", "MODERATE"
-
-    return "🟡 Wide Credit Spread", "MODERATE"
+    return "No Trade / Wait", "NO EDGE"
 
 # ---------------- EXIT ENGINE ----------------
 def exit_engine(rsi, adx, bb_position):
 
-    if adx > 25:
-        return "⚠️ Exit - Trend forming"
+    if adx > 30:
+        return "⚠️ Exit - Strong trend forming"
 
-    if rsi < 40 or rsi > 60:
-        return "⚠️ Exit - Momentum shift"
+    if rsi < 35 or rsi > 65:
+        return "⚠️ Exit - Momentum extreme"
 
-    if bb_position < 0.3 or bb_position > 0.7:
-        return "⚠️ Exit - Range break"
+    if bb_position < 0.25 or bb_position > 0.75:
+        return "⚠️ Exit - Range broken"
 
     return "✅ Hold"
 
@@ -103,8 +142,8 @@ tab1, tab2 = st.tabs(["🔍 Scanner", "📈 Analyzer"])
 # ================= SCANNER =================
 with tab1:
 
-    auto = st.checkbox("Auto Refresh (60s)")
-    
+    auto = st.checkbox("Auto Refresh")
+
     if st.button("Run Scan") or auto:
 
         tickers = load_universe()
@@ -130,16 +169,30 @@ with tab1:
             adx = safe_float(last["ADX"])
 
             bb_range = last["BB_High"] - last["BB_Low"]
-            bb_position = (price - last["BB_Low"]) / bb_range if bb_range != 0 else 0.5
 
-            if 40 <= rsi <= 60 and adx < 25:
+            if bb_range and bb_range > 0:
+                bb_position = (price - last["BB_Low"]) / bb_range
+            else:
+                bb_position = 0.5
 
-                strategy, risk = recommend_strategy(rsi, adx, bb_position)
+            if rsi is None or adx is None:
+                continue
+
+            score = calculate_score(rsi, adx, bb_position)
+            regime = detect_regime(adx, bb_position, rsi)
+
+            if score >= 4 and regime in ["RANGE", "TRANSITION"]:
+
+                strategy, risk = recommend_strategy(score, regime, rsi, bb_position)
+                bias = get_bias(rsi, adx)
 
                 results.append({
                     "Ticker": ticker,
                     "RSI": round(rsi,1),
                     "ADX": round(adx,1),
+                    "Regime": regime,
+                    "Bias": bias,
+                    "Score": score,
                     "Strategy": strategy,
                     "Risk": risk
                 })
@@ -151,13 +204,11 @@ with tab1:
             st.session_state["scan"] = df_results
             st.success(f"Found {len(df_results)} setups")
             st.dataframe(df_results)
-
         else:
             st.warning("No setups found")
 
     if auto:
-        time.sleep(60)
-        st.rerun()
+        st.autorefresh(interval=60000, key="refresh")
 
 # ================= ANALYZER =================
 with tab2:
@@ -167,6 +218,7 @@ with tab2:
     if st.button("Analyze"):
 
         df = get_data(symbol)
+
         if df is None:
             st.error("No data")
         else:
@@ -178,9 +230,17 @@ with tab2:
             adx = safe_float(last["ADX"])
 
             bb_range = last["BB_High"] - last["BB_Low"]
-            bb_position = (price - last["BB_Low"]) / bb_range if bb_range != 0 else 0.5
 
-            strategy, risk = recommend_strategy(rsi, adx, bb_position)
+            if bb_range and bb_range > 0:
+                bb_position = (price - last["BB_Low"]) / bb_range
+            else:
+                bb_position = 0.5
+
+            score = calculate_score(rsi, adx, bb_position)
+            regime = detect_regime(adx, bb_position, rsi)
+            bias = get_bias(rsi, adx)
+
+            strategy, risk = recommend_strategy(score, regime, rsi, bb_position)
             exit_signal = exit_engine(rsi, adx, bb_position)
 
             st.subheader(f"{symbol} — {price:.2f}")
@@ -188,6 +248,9 @@ with tab2:
             st.write(f"RSI: {rsi:.1f}")
             st.write(f"ADX: {adx:.1f}")
             st.write(f"BB Position: {bb_position:.2f}")
+            st.write(f"Regime: {regime}")
+            st.write(f"Bias: {bias}")
+            st.write(f"Score: {score}")
 
             st.subheader("Strategy")
             st.success(f"{strategy} ({risk})")
@@ -196,9 +259,11 @@ with tab2:
             st.warning(exit_signal)
 
             # Chart
-            plt.figure()
-            plt.plot(df["Close"])
-            plt.plot(df["BB_High"], linestyle="--")
-            plt.plot(df["BB_Low"], linestyle="--")
-            plt.title(symbol)
-            st.pyplot(plt)
+            fig, ax = plt.subplots()
+            ax.plot(df["Close"])
+            ax.plot(df["BB_High"], linestyle="--")
+            ax.plot(df["BB_Low"], linestyle="--")
+            ax.set_title(symbol)
+
+            st.pyplot(fig)
+            plt.close(fig)
