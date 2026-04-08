@@ -6,10 +6,11 @@ import matplotlib.pyplot as plt
 from ta.momentum import RSIIndicator
 from ta.trend import ADXIndicator
 from ta.volatility import BollingerBands
+from ta.volume import VolumeWeightedAveragePrice
 
-st.set_page_config(page_title="Options Strategy Engine", layout="wide")
+st.set_page_config(page_title="Options Trading System", layout="wide")
 
-st.title("🧠 Options Strategy Engine (AI Regime + Scoring)")
+st.title("🧠 Options Trading System (Scanner + Analyzer + Exit Engine)")
 
 # ---------------- SAFE FLOAT ----------------
 def safe_float(val):
@@ -36,7 +37,7 @@ def load_universe():
 @st.cache_data
 def get_data(symbol):
     try:
-        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
+        df = yf.download(symbol, period="6mo", interval="1d", progress=False, auto_adjust=True)
         if df is None or df.empty:
             return None
         if isinstance(df.columns, pd.MultiIndex):
@@ -47,9 +48,11 @@ def get_data(symbol):
 
 # ---------------- INDICATORS ----------------
 def add_indicators(df):
+
     close = df["Close"]
     high = df["High"]
     low = df["Low"]
+    volume = df["Volume"]
 
     df["RSI"] = RSIIndicator(close=close).rsi()
     df["ADX"] = ADXIndicator(high=high, low=low, close=close).adx()
@@ -58,83 +61,67 @@ def add_indicators(df):
     df["BB_High"] = bb.bollinger_hband()
     df["BB_Low"] = bb.bollinger_lband()
 
-    df = df.dropna()
-    return df
+    vwap = VolumeWeightedAveragePrice(
+        high=high, low=low, close=close, volume=volume
+    )
+    df["VWAP"] = vwap.volume_weighted_average_price()
 
-# ---------------- REGIME ----------------
-def detect_regime(adx, bb_position, rsi):
-    if adx > 25:
-        return "TREND"
-    elif 0.4 <= bb_position <= 0.6 and 40 <= rsi <= 60:
-        return "RANGE"
+    return df.dropna()
+
+# ---------------- ENTRY MODEL ----------------
+def is_A_plus_setup(price, rsi, adx, vwap, bb_low, bb_high):
+
+    vwap_drift = abs(price - vwap) / price
+
+    if bb_high - bb_low == 0:
+        bb_position = 0.5
     else:
-        return "TRANSITION"
+        bb_position = (price - bb_low) / (bb_high - bb_low)
 
-# ---------------- SCORING ----------------
-def calculate_score(rsi, adx, bb_position):
-    score = 0
+    if (
+        40 <= rsi <= 60 and
+        adx < 25 and
+        vwap_drift <= 0.01 and
+        0.4 <= bb_position <= 0.6
+    ):
+        return True, bb_position, vwap_drift
 
-    if 40 <= rsi <= 60:
-        score += 2
-    elif 35 <= rsi <= 65:
-        score += 1
-
-    if adx < 20:
-        score += 3
-    elif adx < 25:
-        score += 1
-
-    if 0.4 <= bb_position <= 0.6:
-        score += 2
-    elif 0.3 <= bb_position <= 0.7:
-        score += 1
-
-    return score
-
-# ---------------- BIAS ----------------
-def get_bias(rsi, adx):
-    if adx > 25:
-        if rsi > 55:
-            return "BULLISH"
-        elif rsi < 45:
-            return "BEARISH"
-    return "NEUTRAL"
-
-# ---------------- STRATEGY ENGINE ----------------
-def recommend_strategy(score, regime, rsi, bb_position):
-
-    if regime == "RANGE" and score >= 6:
-        return "Iron Condor", "LOW RISK"
-
-    if regime == "RANGE" and score >= 5:
-        return "Double Calendar", "LOW RISK"
-
-    if regime == "RANGE":
-        return "Broken Wing Butterfly", "LOW-MODERATE"
-
-    if regime == "TREND":
-        if rsi > 55:
-            return "Bull Put Spread", "TREND"
-        elif rsi < 45:
-            return "Bear Call Spread", "TREND"
-        else:
-            return "Credit Spread", "TREND"
-
-    return "No Trade / Wait", "NO EDGE"
+    return False, bb_position, vwap_drift
 
 # ---------------- EXIT ENGINE ----------------
-def exit_engine(rsi, adx, bb_position):
+def exit_engine(rsi, adx, bb_position, vwap_drift):
 
-    if adx > 30:
-        return "⚠️ Exit - Strong trend forming"
+    # PRIORITY ORDER (real trading logic)
 
-    if rsi < 35 or rsi > 65:
-        return "⚠️ Exit - Momentum extreme"
+    if adx >= 25:
+        return "⚠️ EXIT — Trend forming (edge gone)"
 
-    if bb_position < 0.25 or bb_position > 0.75:
-        return "⚠️ Exit - Range broken"
+    if vwap_drift > 0.01:
+        return "⚠️ EXIT — Price leaving fair value"
 
-    return "✅ Hold"
+    if rsi < 40 or rsi > 60:
+        return "⚠️ EXIT — Lost neutrality"
+
+    if bb_position < 0.3 or bb_position > 0.7:
+        return "⚠️ EXIT — Range breaking"
+
+    return "✅ HOLD — Conditions intact"
+
+# ---------------- EXIT CONFIDENCE ----------------
+def exit_confidence(rsi, adx, bb_position, vwap_drift):
+
+    score = 0
+
+    if adx >= 25:
+        score += 2
+    if vwap_drift > 0.01:
+        score += 3
+    if rsi < 40 or rsi > 60:
+        score += 2
+    if bb_position < 0.3 or bb_position > 0.7:
+        score += 2
+
+    return score  # out of 9
 
 # ---------------- UI ----------------
 tab1, tab2 = st.tabs(["🔍 Scanner", "📈 Analyzer"])
@@ -142,9 +129,7 @@ tab1, tab2 = st.tabs(["🔍 Scanner", "📈 Analyzer"])
 # ================= SCANNER =================
 with tab1:
 
-    auto = st.checkbox("Auto Refresh")
-
-    if st.button("Run Scan") or auto:
+    if st.button("Run Scan"):
 
         tickers = load_universe()
 
@@ -167,34 +152,25 @@ with tab1:
             price = safe_float(last["Close"])
             rsi = safe_float(last["RSI"])
             adx = safe_float(last["ADX"])
+            vwap = safe_float(last["VWAP"])
 
-            bb_range = last["BB_High"] - last["BB_Low"]
+            bb_low = last["BB_Low"]
+            bb_high = last["BB_High"]
 
-            if bb_range and bb_range > 0:
-                bb_position = (price - last["BB_Low"]) / bb_range
-            else:
-                bb_position = 0.5
-
-            if rsi is None or adx is None:
+            if None in [price, rsi, adx, vwap]:
                 continue
 
-            score = calculate_score(rsi, adx, bb_position)
-            regime = detect_regime(adx, bb_position, rsi)
+            valid, bb_pos, vwap_drift = is_A_plus_setup(
+                price, rsi, adx, vwap, bb_low, bb_high
+            )
 
-            if score >= 4 and regime in ["RANGE", "TRANSITION"]:
-
-                strategy, risk = recommend_strategy(score, regime, rsi, bb_position)
-                bias = get_bias(rsi, adx)
-
+            if valid:
                 results.append({
                     "Ticker": ticker,
                     "RSI": round(rsi,1),
                     "ADX": round(adx,1),
-                    "Regime": regime,
-                    "Bias": bias,
-                    "Score": score,
-                    "Strategy": strategy,
-                    "Risk": risk
+                    "BB Pos": round(bb_pos,2),
+                    "VWAP Drift %": round(vwap_drift*100,2)
                 })
 
             progress.progress((i+1)/len(tickers))
@@ -202,18 +178,26 @@ with tab1:
         if results:
             df_results = pd.DataFrame(results)
             st.session_state["scan"] = df_results
-            st.success(f"Found {len(df_results)} setups")
-            st.dataframe(df_results)
-        else:
-            st.warning("No setups found")
 
-    if auto:
-        st.autorefresh(interval=60000, key="refresh")
+            st.success(f"Found {len(df_results)} A+ setups")
+            st.dataframe(df_results)
+
+            # SELECT TICKER
+            selected = st.selectbox("Select Ticker", df_results["Ticker"])
+
+            if st.button("Analyze Selected"):
+                st.session_state["selected"] = selected
+
+        else:
+            st.warning("No A+ setups found")
 
 # ================= ANALYZER =================
 with tab2:
 
-    symbol = st.text_input("Ticker", value="AAPL")
+    symbol = st.text_input(
+        "Ticker",
+        value=st.session_state.get("selected", "SPY")
+    )
 
     if st.button("Analyze"):
 
@@ -228,42 +212,67 @@ with tab2:
             price = safe_float(last["Close"])
             rsi = safe_float(last["RSI"])
             adx = safe_float(last["ADX"])
+            vwap = safe_float(last["VWAP"])
 
-            bb_range = last["BB_High"] - last["BB_Low"]
+            bb_low = last["BB_Low"]
+            bb_high = last["BB_High"]
 
-            if bb_range and bb_range > 0:
-                bb_position = (price - last["BB_Low"]) / bb_range
-            else:
-                bb_position = 0.5
+            bb_range = bb_high - bb_low
+            bb_position = (price - bb_low) / bb_range if bb_range != 0 else 0.5
 
-            score = calculate_score(rsi, adx, bb_position)
-            regime = detect_regime(adx, bb_position, rsi)
-            bias = get_bias(rsi, adx)
+            vwap_drift = abs(price - vwap) / price
 
-            strategy, risk = recommend_strategy(score, regime, rsi, bb_position)
-            exit_signal = exit_engine(rsi, adx, bb_position)
-
+            # DISPLAY
             st.subheader(f"{symbol} — {price:.2f}")
 
             st.write(f"RSI: {rsi:.1f}")
             st.write(f"ADX: {adx:.1f}")
             st.write(f"BB Position: {bb_position:.2f}")
-            st.write(f"Regime: {regime}")
-            st.write(f"Bias: {bias}")
-            st.write(f"Score: {score}")
+            st.write(f"VWAP Drift: {vwap_drift*100:.2f}%")
 
-            st.subheader("Strategy")
-            st.success(f"{strategy} ({risk})")
+            # EXIT
+            exit_signal = exit_engine(rsi, adx, bb_position, vwap_drift)
+            confidence = exit_confidence(rsi, adx, bb_position, vwap_drift)
 
-            st.subheader("Exit Signal")
+            st.subheader("🚦 Exit Decision")
             st.warning(exit_signal)
+            st.write(f"Confidence: {confidence}/9")
 
-            # Chart
+            # ---------------- TRADE TRACKER ----------------
+            st.subheader("📒 Track Trade")
+
+            if "trades" not in st.session_state:
+                st.session_state["trades"] = []
+
+            entry = st.number_input("Entry Price", value=3.0)
+            current = st.number_input("Current Price", value=3.2)
+
+            if st.button("Add Trade"):
+                st.session_state["trades"].append({
+                    "Ticker": symbol,
+                    "Entry": entry,
+                    "Current": current
+                })
+                st.success("Trade added")
+
+            # SHOW TRADES
+            st.subheader("📊 Active Trades")
+
+            for trade in st.session_state["trades"]:
+
+                pnl = ((trade["Current"] - trade["Entry"]) / trade["Entry"]) * 100
+
+                st.write(f"{trade['Ticker']} → P&L: {pnl:.2f}%")
+
+            # ---------------- CHART ----------------
             fig, ax = plt.subplots()
-            ax.plot(df["Close"])
-            ax.plot(df["BB_High"], linestyle="--")
-            ax.plot(df["BB_Low"], linestyle="--")
+            ax.plot(df["Close"], label="Price")
+            ax.plot(df["BB_High"], linestyle="--", label="BB High")
+            ax.plot(df["BB_Low"], linestyle="--", label="BB Low")
+            ax.plot(df["VWAP"], linestyle=":", label="VWAP")
+
             ax.set_title(symbol)
+            ax.legend()
 
             st.pyplot(fig)
             plt.close(fig)
