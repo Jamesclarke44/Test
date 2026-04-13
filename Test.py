@@ -1,7 +1,7 @@
 # app.py
 # -----------------------------------------
 # EOD Swing-Trade Scanner (Long Only)
-# - Scans 1500+ U.S. stocks (S&P 500 + Russell 1000)
+# - Scans 1500+ U.S. stocks (local universe)
 # - Uptrend + pullback + momentum turn
 # - Ranks best "buy low, sell high" setups
 # -----------------------------------------
@@ -22,7 +22,7 @@ MAX_PRICE = 200
 MIN_AVG_VOLUME = 1_000_000
 
 
-# ------------------ LOAD UNIVERSE ------------------
+# ------------------ LOCAL UNIVERSE ------------------
 
 @st.cache_data(show_spinner=True)
 def load_universe():
@@ -49,29 +49,29 @@ def load_universe():
         "ON","SWKS","QRVO","MPWR","NXPI","ALGN","ILMN","IDXX","MTD","A","PKI","TECH",
         "WAT","BSX","BAX","EW","XRAY","HSIC","STE","TFX","COO","ABMD","HCA","UHS",
         "UNM","PRU","MET","AFL","GL","VOYA","AMP","ALL","TRV","WRB","RE","AJG",
-        "AIG","WLTW","BRK-A","SPGI","MCO","NDAQ","CME","MSCI","IVZ","TROW","BEN",
-        "STT","NTRS","CP","CSX","NSC","UNP","JBHT","ODFL","CHRW","EXPD","UPS","FDX",
-        "UAL","DAL","AAL","LUV","ALK","HA","CPA","BA","GD","NOC","LHX","TXT","HEI",
-        "TDG","SPR","ETR","PEG","ES","DTE","NRG","EXC","AWK","WTRG","XYL","PNR",
-        "ROK","EMR","AME","ITW","PH","SWK","TT","CARR","OTIS","IR","AWI","OC","MLM",
-        "VMC","EXP","CRH","APG","BLD","ALLE","FBHS","WHR","NWL","LEG","TPX","SNBR",
-        "PRPL","ETSY","W","OSTK","WSM","BURL","KSS","JWN","M","GME","AN","AZO",
-        "ORLY","AAP","TSCO","UL","KMB","CHD","REV","IPAR","ACI","SFM","IMKTA","GO",
-        "CASY","TSN","HRL","SAFM","PPC","HSY","CPB","STZ","BF-B","TAP","CCEP",
-        "RIVN","LCID","NIO","XPEV","LI","FSR","WKHS","GOEV","QS","BLNK","CHPT",
-        "RUN","SEDG","ENPH","FSLR","SPWR","NOVA","ARRY","BE","PLUG","BEP","NEE",
-        "SRE","DUK","SO","AEP","XEL","ED","D","FE","PPL","NRG","EXC","PCG","EIX",
-        "AMT","EQIX","DLR","IRM","PLD","SPG","O","ARE","AVB","EQR","ESS","UDR",
-        "MAA","VTR","PEAK","WELL","REG","FRT","KIM","BRX","ROIC","STOR","NNN",
-        "ADC","GTY","PSA","CUBE","EXR","LSI","NSA","WY","RYN","PCH","CF","ADM",
-        "BG","INGR","SMG","MOS","NTR","CTVA","DE","AGCO","TTC","MTZ","PWR","FLR",
-        "J","ACM","KBR","URI","ASH","ALB","LTHM","SQM","FCX","SCCO","NEM","GOLD",
-        "AEM","WPM","PAAS","HL","AA","CENX","STLD","NUE","X","CLF","CMC","RS",
+        "AIG","WLTW","BRK-A","MCO","NDAQ","CME","MSCI","IVZ","TROW","BEN","STT",
+        "NTRS","CP","NSC","UNP","JBHT","ODFL","CHRW","EXPD","UPS","FDX","UAL","DAL",
+        "AAL","LUV","ALK","HA","CPA","BA","GD","NOC","LHX","TXT","HEI","TDG","SPR",
+        "ETR","PEG","ES","DTE","NRG","EXC","AWK","WTRG","XYL","PNR","ROK","EMR",
+        "AME","ITW","PH","SWK","TT","CARR","OTIS","IR","AWI","OC","MLM","VMC","EXP",
+        "CRH","APG","BLD","ALLE","FBHS","WHR","NWL","LEG","TPX","SNBR","PRPL","ETSY",
+        "W","OSTK","WSM","BURL","KSS","JWN","M","GME","AN","AZO","ORLY","AAP","TSCO",
+        "UL","KMB","CHD","REV","IPAR","ACI","SFM","IMKTA","GO","CASY","TSN","HRL",
+        "SAFM","PPC","HSY","CPB","STZ","BF-B","TAP","CCEP","RIVN","LCID","NIO","XPEV",
+        "LI","FSR","WKHS","GOEV","QS","BLNK","CHPT","RUN","SEDG","ENPH","FSLR","SPWR",
+        "NOVA","ARRY","BE","PLUG","BEP","NEE","SRE","DUK","SO","AEP","XEL","ED","D",
+        "FE","PPL","NRG","EXC","PCG","EIX","AMT","IRM","PLD","SPG","O","ARE","AVB",
+        "EQR","ESS","UDR","MAA","VTR","PEAK","WELL","REG","FRT","KIM","BRX","ROIC",
+        "STOR","NNN","ADC","GTY","PSA","CUBE","EXR","LSI","NSA","WY","RYN","PCH","CF",
+        "ADM","BG","INGR","SMG","MOS","NTR","CTVA","DE","AGCO","TTC","MTZ","PWR",
+        "FLR","J","ACM","KBR","URI","ASH","ALB","LTHM","SQM","FCX","SCCO","NEM",
+        "GOLD","AEM","WPM","PAAS","HL","AA","CENX","STLD","NUE","X","CLF","CMC","RS",
         "PKG","WRK","IP","SEE","AVY","OI","BLL","CCK","SON","AMCR"
     ]
 
     cleaned = [t.replace(".", "-").upper() for t in tickers]
     return sorted(list(set(cleaned)))
+
 
 # ------------------ INDICATORS ------------------
 
@@ -120,7 +120,9 @@ def load_data_long_form(tickers, start, end, batch_size=200):
             group_by="ticker"
         )
 
-        # Multi-index case
+        if raw.empty:
+            continue
+
         if isinstance(raw.columns, pd.MultiIndex):
             for t in batch:
                 if t not in raw.columns.levels[0]:
@@ -130,7 +132,6 @@ def load_data_long_form(tickers, start, end, batch_size=200):
                 df_t = df_t.reset_index().rename(columns={"Date": "Date"})
                 all_records.append(df_t)
         else:
-            # Single ticker fallback
             t = batch[0]
             df_t = raw.copy()
             df_t["Ticker"] = t
@@ -178,14 +179,11 @@ def evaluate_row(row, prev):
     atr_pct = row["ATR_PCT"]
     vol, vol20 = row["Volume"], row["Vol20"]
 
-    # Trend (incline)
     trend_ok = close > sma20 > sma50 > sma200
 
-    # Pullback
     recent = prev.tail(5)
     pullback_ok = ((recent["Low"] <= recent["EMA20"]) | (recent["Low"] <= recent["SMA20"])).any()
 
-    # Momentum turn
     momentum_ok = False
     if len(recent) >= 3:
         rsi_recent = recent["RSI14"].dropna()
@@ -194,10 +192,7 @@ def evaluate_row(row, prev):
             rsi_prev = rsi_recent.iloc[-1]
             momentum_ok = (35 <= rsi_min <= 50) and (rsi14 > 45) and (rsi14 > rsi_prev)
 
-    # Volume confirmation
     vol_ok = vol20 > 0 and vol >= 1.2 * vol20
-
-    # ATR sanity
     atr_ok = 0.01 <= atr_pct <= 0.05
 
     is_setup = trend_ok and pullback_ok and momentum_ok and vol_ok and atr_ok
@@ -227,6 +222,9 @@ def generate_signals(df):
         last["IsSetup"] = is_setup
         rows.append(last)
 
+    if not rows:
+        return pd.DataFrame()
+
     out = pd.DataFrame(rows)
     return out[out["IsSetup"]].sort_values("Score", ascending=False)
 
@@ -237,7 +235,10 @@ def main():
     st.set_page_config(page_title="Swing Scanner", layout="wide")
     st.title("📈 EOD Swing Scanner — Long Only (Buy Low / Sell High)")
 
-    st.write("Scans **1500+ U.S. stocks** for incline + pullback + momentum setups.")
+    st.markdown(
+        "Scans **1500+ U.S. stocks** for incline + pullback + momentum setups.\n\n"
+        "**Educational use only — not financial advice.**"
+    )
 
     with st.spinner("Loading universe..."):
         universe_all = load_universe()
@@ -247,9 +248,9 @@ def main():
 
     max_tickers = st.sidebar.slider(
         "Tickers to scan",
-        min_value=100,
+        min_value=50,
         max_value=len(universe_all),
-        value=1000,
+        value=500,
         step=50
     )
 
@@ -274,10 +275,16 @@ def main():
             signals = generate_signals(df_ind)
 
         st.subheader("Top Buy-Low / Sell-High Candidates")
-        st.dataframe(signals[[
-            "Ticker", "Date", "Close", "SMA20", "SMA50", "SMA200",
-            "EMA20", "RSI14", "ATR_PCT", "Volume", "Vol20", "Score"
-        ]], use_container_width=True)
+        if signals.empty:
+            st.info("No setups found today.")
+        else:
+            st.dataframe(
+                signals[[
+                    "Ticker","Date","Close","SMA20","SMA50","SMA200",
+                    "EMA20","RSI14","ATR_PCT","Volume","Vol20","Score"
+                ]],
+                use_container_width=True
+            )
 
     else:
         st.info("Set your options and click **Run Scan**.")
