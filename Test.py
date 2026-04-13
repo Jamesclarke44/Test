@@ -2,27 +2,42 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
 
 st.set_page_config(page_title="Momentum Scanner PRO", layout="wide")
 
-st.title("⚡ Momentum Scanner PRO (Expanded Market Scan)")
+st.title("⚡ Momentum Scanner PRO (Stable + Expanded)")
 
 # ---------------- DATA SOURCES ----------------
 
 @st.cache_data(ttl=3600)
 def get_sp500():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    table = pd.read_html(url)[0]
-    return table['Symbol'].tolist()
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    try:
+        response = requests.get(url, headers=headers)
+        tables = pd.read_html(response.text)
+        return tables[0]['Symbol'].tolist()
+    except:
+        st.warning("⚠️ Failed to load S&P 500 list. Using fallback.")
+        return [
+            "AAPL","MSFT","NVDA","AMZN","META","TSLA","GOOGL","AMD",
+            "NFLX","INTC","PLTR","SOFI","BAC","F","CCL"
+        ]
 
 @st.cache_data(ttl=300)
 def get_top_gainers():
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
     try:
-        data = pd.read_json(url)
+        response = requests.get(url, headers=headers)
+        data = response.json()
         quotes = data['finance']['result'][0]['quotes']
         return [q['symbol'] for q in quotes]
     except:
+        st.warning("⚠️ Failed to load top gainers.")
         return []
 
 # ---------------- BUILD UNIVERSE ----------------
@@ -30,14 +45,15 @@ def get_top_gainers():
 sp500 = get_sp500()
 gainers = get_top_gainers()
 
-# Combine (THIS IS THE EDGE)
+st.write(f"Gainers: {len(gainers)} | SP500: {len(sp500)}")
+
 tickers = list(set(gainers + sp500))
 
-# Limit for performance
+# User control (VERY IMPORTANT)
 MAX_TICKERS = st.slider("Max Stocks to Scan", 50, 1000, 300)
 tickers = tickers[:MAX_TICKERS]
 
-st.write(f"Scanning {len(tickers)} stocks...")
+st.write(f"🔍 Scanning {len(tickers)} stocks...")
 
 # ---------------- DATA FETCH ----------------
 
@@ -53,7 +69,7 @@ def get_data(ticker):
 
 def relative_volume(df):
     avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
-    if avg_vol == 0:
+    if avg_vol == 0 or np.isnan(avg_vol):
         return 0
     return df['Volume'].iloc[-1] / avg_vol
 
@@ -72,14 +88,17 @@ def score(rel_vol, mom, is_breakout):
 
 results = []
 
-for ticker in tickers:
+progress = st.progress(0)
+
+for i, ticker in enumerate(tickers):
     df = get_data(ticker)
+
     if df is None or len(df) < 20:
         continue
 
     price = df['Close'].iloc[-1]
 
-    # Ross-style filters
+    # Ross-style price filter
     if price < 2 or price > 50:
         continue
 
@@ -87,6 +106,7 @@ for ticker in tickers:
     mom = momentum(df)
     is_breakout, hod = breakout(df)
 
+    # Core momentum filter
     if rel_vol > 2 and mom > 1:
         entry = price
         stop = price * 0.97
@@ -104,13 +124,16 @@ for ticker in tickers:
             "Score": score(rel_vol, mom, is_breakout)
         })
 
+    # Progress bar update
+    progress.progress((i + 1) / len(tickers))
+
 # ---------------- DISPLAY ----------------
 
 df_results = pd.DataFrame(results)
 
 if not df_results.empty:
     df_results = df_results.sort_values(by="Score", ascending=False)
+    st.success(f"✅ Found {len(df_results)} momentum setups")
     st.dataframe(df_results, use_container_width=True)
 else:
-    st.warning("No strong setups right now.")
-    
+    st.warning("⚠️ No strong setups right now.")
