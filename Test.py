@@ -905,3 +905,4 @@ else:
                 st.dataframe(df, use_container_width=True)
         else:
             st.info("Click **Scan Now** to run the 5‑min Pullback Scanner.")
+            
