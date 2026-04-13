@@ -1,139 +1,431 @@
+# ============================================================
+# PART 1 — IMPORTS & UNIVERSE
+# ============================================================
+
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
-import requests
+import yfinance as yf
+import datetime as dt
+from functools import lru_cache
 
-st.set_page_config(page_title="Momentum Scanner PRO", layout="wide")
+# ---------- Universe from CSV ----------
 
-st.title("⚡ Momentum Scanner PRO (Stable + Expanded)")
+UNIVERSE_CSV = "tickers.csv"   # <--- change if needed
+UNIVERSE_COL = "Symbol"        # <--- change if needed
 
-# ---------------- DATA SOURCES ----------------
-
-@st.cache_data(ttl=3600)
-def get_sp500():
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
+@st.cache_data
+def load_universe():
     try:
-        response = requests.get(url, headers=headers)
-        tables = pd.read_html(response.text)
-        return tables[0]['Symbol'].tolist()
-    except:
-        st.warning("⚠️ Failed to load S&P 500 list. Using fallback.")
-        return [
-            "AAPL","MSFT","NVDA","AMZN","META","TSLA","GOOGL","AMD",
-            "NFLX","INTC","PLTR","SOFI","BAC","F","CCL"
-        ]
-
-@st.cache_data(ttl=300)
-def get_top_gainers():
-    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    try:
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        quotes = data['finance']['result'][0]['quotes']
-        return [q['symbol'] for q in quotes]
-    except:
-        st.warning("⚠️ Failed to load top gainers.")
+        df = pd.read_csv(UNIVERSE_CSV)
+        tickers = df[UNIVERSE_COL].dropna().astype(str).unique().tolist()
+        # Basic cleaning: remove weird symbols
+        tickers = [t.strip().upper() for t in tickers if t.strip().isalpha()]
+        return tickers
+    except Exception as e:
+        st.error(f"Failed to load universe from {UNIVERSE_CSV}: {e}")
         return []
 
-# ---------------- BUILD UNIVERSE ----------------
+TICKERS = load_universe()
+# ============================================================
+# PART 2 — SETTINGS
+# ============================================================
 
-sp500 = get_sp500()
-gainers = get_top_gainers()
+def init_settings():
+    if "settings" not in st.session_state:
+        st.session_state.settings = {
+            "min_price": 2.0,
+            "max_price": 20.0,
+            "min_rvol": 3.0,
+            "max_float_millions": 50.0,
+            "gap_min_pct": 5.0,
+            "require_catalyst": False,  # placeholder
+        }
 
-st.write(f"Gainers: {len(gainers)} | SP500: {len(sp500)}")
+def settings_panel():
+    settings = st.session_state.settings
+    st.sidebar.header("Scanner Settings")
 
-tickers = list(set(gainers + sp500))
+    settings["min_price"] = st.sidebar.number_input("Min Price", 0.5, 100.0, settings["min_price"], 0.5)
+    settings["max_price"] = st.sidebar.number_input("Max Price", 1.0, 200.0, settings["max_price"], 0.5)
+    settings["min_rvol"] = st.sidebar.number_input("Min RVOL", 1.0, 20.0, settings["min_rvol"], 0.5)
+    settings["max_float_millions"] = st.sidebar.number_input("Max Float (M)", 1.0, 500.0, settings["max_float_millions"], 1.0)
+    settings["gap_min_pct"] = st.sidebar.number_input("Min Gap %", 1.0, 100.0, settings["gap_min_pct"], 1.0)
+    settings["require_catalyst"] = st.sidebar.checkbox("Require Catalyst (placeholder)", value=settings["require_catalyst"])
+# ============================================================
+# PART 3 — DATA LOADERS, FLOAT, RVOL
+# ============================================================
 
-# User control (VERY IMPORTANT)
-MAX_TICKERS = st.slider("Max Stocks to Scan", 50, 1000, 300)
-tickers = tickers[:MAX_TICKERS]
+# ---------- Float filter (placeholder: random-ish / demo) ----------
 
-st.write(f"🔍 Scanning {len(tickers)} stocks...")
-
-# ---------------- DATA FETCH ----------------
-
-@st.cache_data(ttl=300)
-def get_data(ticker):
+@lru_cache(maxsize=4096)
+def get_float_millions(ticker: str) -> float:
+    # In production, replace with real float API
+    # For now, approximate using market cap / price if available
     try:
-        df = yf.download(ticker, period="2d", interval="5m", progress=False)
-        return df
-    except:
+        info = yf.Ticker(ticker).info
+        shares = info.get("sharesOutstanding", None)
+        if shares is None:
+            return 1000.0  # treat as large float
+        return shares / 1_000_000.0
+    except Exception:
+        return 1000.0
+
+def passes_float_filter(ticker: str, max_float_millions: float) -> bool:
+    f = get_float_millions(ticker)
+    return f <= max_float_millions
+
+# ---------- Daily data & RVOL ----------
+
+@st.cache_data
+def download_daily_data(tickers, period="1mo"):
+    try:
+        data = yf.download(
+            tickers=tickers,
+            period=period,
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=False,
+            threads=True,
+            progress=False
+        )
+        return data
+    except Exception:
         return None
 
-# ---------------- LOGIC ----------------
+def compute_rvol(today_volume, avg20_volume):
+    if avg20_volume is None or avg20_volume == 0:
+        return 0.0
+    return today_volume / avg20_volume
 
-def relative_volume(df):
-    avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
-    if avg_vol == 0 or np.isnan(avg_vol):
+# ---------- Intraday batch loader ----------
+
+@st.cache_data
+def download_intraday_batches(tickers, interval="1m", period="1d"):
+    try:
+        data = yf.download(
+            tickers=tickers,
+            period=period,
+            interval=interval,
+            group_by="ticker",
+            auto_adjust=False,
+            threads=True,
+            progress=False
+        )
+        # Normalize to dict[ticker] -> df
+        result = {}
+        if isinstance(data.columns, pd.MultiIndex):
+            for t in tickers:
+                if t in data.columns.get_level_values(0):
+                    df_t = data[t].dropna()
+                    df_t.index = df_t.index.tz_localize(None)
+                    result[t] = df_t
+        else:
+            # Single ticker case
+            df = data.dropna()
+            df.index = df.index.tz_localize(None)
+            if len(tickers) == 1:
+                result[tickers[0]] = df
+        return result
+    except Exception:
+        return {}
+# ============================================================
+# PART 4 — SCANNERS & ENGINES
+# ============================================================
+
+# ---------- Trend Engine (EMA9, EMA20, VWAP) ----------
+
+def ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
+
+def vwap(df):
+    pv = (df["Close"] * df["Volume"]).cumsum()
+    vol = df["Volume"].cumsum()
+    return pv / vol
+
+def compute_trend_metrics(df):
+    if df is None or df.empty:
+        return None
+    df = df.copy()
+    df["EMA9"] = ema(df["Close"], 9)
+    df["EMA20"] = ema(df["Close"], 20)
+    df["VWAP"] = vwap(df)
+    df["TrendStrong"] = (df["EMA9"] > df["EMA20"]) & (df["Close"] > df["VWAP"])
+    return df
+
+def compute_momentum_score(df):
+    if df is None or df.empty:
         return 0
-    return df['Volume'].iloc[-1] / avg_vol
+    last = df.iloc[-1]
+    score = 0
+    if last["EMA9"] > last["EMA20"]:
+        score += 2
+    if last["Close"] > last["VWAP"]:
+        score += 2
+    if len(df) > 3:
+        if df["High"].iloc[-1] > df["High"].iloc[-2]:
+            score += 1
+        if df["High"].iloc[-2] > df["High"].iloc[-3]:
+            score += 1
+    if len(df) > 5:
+        if df["Volume"].iloc[-1] > df["Volume"].iloc[-2]:
+            score += 1
+    return score
 
-def momentum(df):
-    return (df['Close'].iloc[-1] - df['Close'].iloc[-4]) / df['Close'].iloc[-4] * 100
+def is_new_hod(df):
+    if df is None or df.empty:
+        return False
+    return df["High"].iloc[-1] >= df["High"].max()
 
-def breakout(df):
-    hod = df['High'].max()
-    price = df['Close'].iloc[-1]
-    return price >= hod * 0.98, hod
+# ---------- Core Momentum Scanner ----------
 
-def score(rel_vol, mom, is_breakout):
-    return round(rel_vol*2 + mom*3 + (2 if is_breakout else 0), 2)
+def run_momentum_scanner(interval="1m"):
+    st.write(f"⚡ Running Momentum Scanner ({interval})…")
+    settings = st.session_state.settings
 
-# ---------------- SCAN ----------------
+    # Float filter first
+    float_pass = [
+        t for t in TICKERS
+        if passes_float_filter(t, settings["max_float_millions"])
+    ]
+    if not float_pass:
+        return pd.DataFrame()
 
-results = []
+    daily = download_daily_data(float_pass, period="1mo")
+    if daily is None or daily.empty:
+        return pd.DataFrame()
 
-progress = st.progress(0)
+    intraday = download_intraday_batches(float_pass, interval=interval, period="1d")
+    results = []
 
-for i, ticker in enumerate(tickers):
-    df = get_data(ticker)
+    for ticker in float_pass:
+        # Daily slice
+        try:
+            d = daily[ticker]
+        except Exception:
+            continue
+        if d is None or d.empty or len(d) < 21:
+            continue
 
-    if df is None or len(df) < 20:
-        continue
+        today_volume = d["Volume"].iloc[-1]
+        avg20_volume = d["Volume"].iloc[-21:-1].mean()
+        rvol = compute_rvol(today_volume, avg20_volume)
+        if rvol < settings["min_rvol"]:
+            continue
 
-    price = df['Close'].iloc[-1]
+        df = intraday.get(ticker)
+        if df is None or df.empty:
+            continue
 
-    # Ross-style price filter
-    if price < 2 or price > 50:
-        continue
+        last_price = df["Close"].iloc[-1]
+        if last_price < settings["min_price"] or last_price > settings["max_price"]:
+            continue
 
-    rel_vol = relative_volume(df)
-    mom = momentum(df)
-    is_breakout, hod = breakout(df)
+        df = compute_trend_metrics(df)
+        if df is None:
+            continue
 
-    # Core momentum filter
-    if rel_vol > 2 and mom > 1:
-        entry = price
-        stop = price * 0.97
-        target = price * 1.05
+        if not df["TrendStrong"].iloc[-1]:
+            continue
+
+        if not is_new_hod(df):
+            continue
+
+        score = compute_momentum_score(df)
 
         results.append({
             "Ticker": ticker,
-            "Price": round(price, 2),
-            "Rel Vol": round(rel_vol, 2),
-            "Momentum %": round(mom, 2),
-            "Setup": "HOD Breakout" if is_breakout else "Momentum Build",
-            "Entry": round(entry, 2),
-            "Stop": round(stop, 2),
-            "Target": round(target, 2),
-            "Score": score(rel_vol, mom, is_breakout)
+            "Price": round(last_price, 2),
+            "RVOL": round(rvol, 2),
+            "Trend Strong": "Yes",
+            "New HOD": "Yes",
+            "Momentum Score": score
         })
 
-    # Progress bar update
-    progress.progress((i + 1) / len(tickers))
+    if not results:
+        return pd.DataFrame()
 
-# ---------------- DISPLAY ----------------
+    out = pd.DataFrame(results)
+    out = out.sort_values("Momentum Score", ascending=False)
+    out.reset_index(drop=True, inplace=True)
+    return out
 
-df_results = pd.DataFrame(results)
+def run_momentum_1m():
+    return run_momentum_scanner(interval="1m")
 
-if not df_results.empty:
-    df_results = df_results.sort_values(by="Score", ascending=False)
-    st.success(f"✅ Found {len(df_results)} momentum setups")
-    st.dataframe(df_results, use_container_width=True)
-else:
-    st.warning("⚠️ No strong setups right now.")
+def run_momentum_5m():
+    return run_momentum_scanner(interval="5m")
+
+# ---------- Gap Scanner ----------
+
+def run_gap_scanner():
+    st.write("⚡ Running Gap Scanner…")
+    settings = st.session_state.settings
+
+    daily = download_daily_data(TICKERS, period="5d")
+    if daily is None or daily.empty:
+        return pd.DataFrame()
+
+    results = []
+    for ticker in TICKERS:
+        try:
+            d = daily[ticker]
+        except Exception:
+            continue
+        if d is None or d.empty or len(d) < 2:
+            continue
+
+        prev_close = d["Close"].iloc[-2]
+        last_close = d["Close"].iloc[-1]
+        gap_pct = (last_close - prev_close) / prev_close * 100
+
+        if gap_pct < settings["gap_min_pct"]:
+            continue
+
+        today_volume = d["Volume"].iloc[-1]
+        avg20_volume = d["Volume"].iloc[-min(21, len(d)):-1].mean()
+        rvol = compute_rvol(today_volume, avg20_volume)
+        if rvol < settings["min_rvol"]:
+            continue
+
+        if last_close < settings["min_price"] or last_close > settings["max_price"]:
+            continue
+
+        if not passes_float_filter(ticker, settings["max_float_millions"]):
+            continue
+
+        results.append({
+            "Ticker": ticker,
+            "Price": round(last_close, 2),
+            "Gap %": round(gap_pct, 2),
+            "RVOL": round(rvol, 2)
+        })
+
+    if not results:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(results)
+    out = out.sort_values("Gap %", ascending=False)
+    out.reset_index(drop=True, inplace=True)
+    return out
+
+# ---------- Pullback Scanner (1m / 5m) ----------
+
+def run_pullback_scanner(interval="1m"):
+    st.write(f"⚡ Running Pullback Scanner ({interval})…")
+    settings = st.session_state.settings
+
+    float_pass = [
+        t for t in TICKERS
+        if passes_float_filter(t, settings["max_float_millions"])
+    ]
+    if not float_pass:
+        return pd.DataFrame()
+
+    intraday = download_intraday_batches(float_pass, interval=interval, period="1d")
+    results = []
+
+    for ticker in float_pass:
+        df = intraday.get(ticker)
+        if df is None or df.empty:
+            continue
+
+        last_price = df["Close"].iloc[-1]
+        if last_price < settings["min_price"] or last_price > settings["max_price"]:
+            continue
+
+        df = compute_trend_metrics(df)
+        if df is None:
+            continue
+
+        last = df.iloc[-1]
+
+        # Simple pullback logic: strong trend, price near EMA9
+        if last["TrendStrong"] and last["Close"] >= last["EMA9"] * 0.995 and last["Close"] <= last["EMA9"] * 1.01:
+            results.append({
+                "Ticker": ticker,
+                "Price": round(last_price, 2),
+                "EMA9": round(last["EMA9"], 2),
+                "EMA20": round(last["EMA20"], 2),
+            })
+
+    if not results:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(results)
+    out.reset_index(drop=True, inplace=True)
+    return out
+
+def run_pullback_1m():
+    return run_pullback_scanner(interval="1m")
+
+def run_pullback_5m():
+    return run_pullback_scanner(interval="5m")
+# ============================================================
+# PART 5 — UI HELPERS
+# ============================================================
+
+def render_results_table(df, title: str):
+    st.subheader(title)
+    if df is None or df.empty:
+        st.info("No setups found.")
+        return
+    st.dataframe(df, use_container_width=True)
+
+def render_summary(df, label: str):
+    if df is None or df.empty:
+        st.write(f"{label}: 0 results")
+    else:
+        st.write(f"{label}: {len(df)} results")
+# ============================================================
+# PART 6 — MAIN UI
+# ============================================================
+
+def main():
+    st.set_page_config(page_title="Full Market Scanner", layout="wide")
+    init_settings()
+    settings_panel()
+
+    st.title("Full U.S. Market Scanner")
+    st.caption("Momentum • Gap • Pullback — batch-based, Ross-style logic")
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Momentum", "Gap", "Pullback", "Debug"])
+
+    with tab1:
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Run Momentum 1m"):
+                df = run_momentum_1m()
+                render_summary(df, "Momentum 1m")
+                render_results_table(df, "Momentum 1m Results")
+        with col2:
+            if st.button("Run Momentum 5m"):
+                df = run_momentum_5m()
+                render_summary(df, "Momentum 5m")
+                render_results_table(df, "Momentum 5m Results")
+
+    with tab2:
+        if st.button("Run Gap Scanner"):
+            df = run_gap_scanner()
+            render_summary(df, "Gap Scanner")
+            render_results_table(df, "Gap Scanner Results")
+
+    with tab3:
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Run Pullback 1m"):
+                df = run_pullback_1m()
+                render_summary(df, "Pullback 1m")
+                render_results_table(df, "Pullback 1m Results")
+        with col2:
+            if st.button("Run Pullback 5m"):
+                df = run_pullback_5m()
+                render_summary(df, "Pullback 5m")
+                render_results_table(df, "Pullback 5m Results")
+
+    with tab4:
+        st.write("Universe size:", len(TICKERS))
+        st.write("Universe sample:", TICKERS[:50])
+
+if __name__ == "__main__":
+    main()
