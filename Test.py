@@ -113,3 +113,4 @@ if not df_results.empty:
     st.dataframe(df_results, use_container_width=True)
 else:
     st.warning("No strong setups right now.")
+    
