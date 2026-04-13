@@ -130,7 +130,7 @@ def download_intraday_batches(tickers, interval="1m", period="1d"):
     except Exception:
         return {}
 # ============================================================
-# PART 4 — SCANNERS & ENGINES
+# PART 4 — SCANNERS & ENGINES (PATCHED)
 # ============================================================
 
 # ---------- Trend Engine (EMA9, EMA20, VWAP) ----------
@@ -153,6 +153,8 @@ def compute_trend_metrics(df):
     df["TrendStrong"] = (df["EMA9"] > df["EMA20"]) & (df["Close"] > df["VWAP"])
     return df
 
+# ---------- Momentum Score ----------
+
 def compute_momentum_score(df):
     if df is None or df.empty:
         return 0
@@ -172,18 +174,20 @@ def compute_momentum_score(df):
             score += 1
     return score
 
+# ---------- New High of Day ----------
+
 def is_new_hod(df):
     if df is None or df.empty:
         return False
     return df["High"].iloc[-1] >= df["High"].max()
 
-# ---------- Core Momentum Scanner ----------
+# ---------- Core Momentum Scanner (PATCHED) ----------
 
 def run_momentum_scanner(interval="1m"):
     st.write(f"⚡ Running Momentum Scanner ({interval})…")
     settings = st.session_state.settings
 
-    # Float filter first
+    # Float filter
     float_pass = [
         t for t in TICKERS
         if passes_float_filter(t, settings["max_float_millions"])
@@ -191,28 +195,34 @@ def run_momentum_scanner(interval="1m"):
     if not float_pass:
         return pd.DataFrame()
 
+    # DAILY DATA (PATCHED)
     daily = download_daily_data(float_pass, period="1mo")
-    if daily is None or daily.empty:
+    if daily is None:   # <-- FIXED: removed daily.empty
         return pd.DataFrame()
 
+    # INTRADAY DATA
     intraday = download_intraday_batches(float_pass, interval=interval, period="1d")
     results = []
 
     for ticker in float_pass:
+
         # Daily slice
         try:
             d = daily[ticker]
         except Exception:
             continue
+
         if d is None or d.empty or len(d) < 21:
             continue
 
         today_volume = d["Volume"].iloc[-1]
         avg20_volume = d["Volume"].iloc[-21:-1].mean()
         rvol = compute_rvol(today_volume, avg20_volume)
+
         if rvol < settings["min_rvol"]:
             continue
 
+        # Intraday slice
         df = intraday.get(ticker)
         if df is None or df.empty:
             continue
@@ -256,14 +266,14 @@ def run_momentum_1m():
 def run_momentum_5m():
     return run_momentum_scanner(interval="5m")
 
-# ---------- Gap Scanner ----------
+# ---------- Gap Scanner (PATCHED) ----------
 
 def run_gap_scanner():
     st.write("⚡ Running Gap Scanner…")
     settings = st.session_state.settings
 
     daily = download_daily_data(TICKERS, period="5d")
-    if daily is None or daily.empty:
+    if daily is None:   # <-- FIXED
         return pd.DataFrame()
 
     results = []
@@ -272,6 +282,7 @@ def run_gap_scanner():
             d = daily[ticker]
         except Exception:
             continue
+
         if d is None or d.empty or len(d) < 2:
             continue
 
@@ -285,6 +296,7 @@ def run_gap_scanner():
         today_volume = d["Volume"].iloc[-1]
         avg20_volume = d["Volume"].iloc[-min(21, len(d)):-1].mean()
         rvol = compute_rvol(today_volume, avg20_volume)
+
         if rvol < settings["min_rvol"]:
             continue
 
@@ -309,7 +321,7 @@ def run_gap_scanner():
     out.reset_index(drop=True, inplace=True)
     return out
 
-# ---------- Pullback Scanner (1m / 5m) ----------
+# ---------- Pullback Scanner (PATCHED) ----------
 
 def run_pullback_scanner(interval="1m"):
     st.write(f"⚡ Running Pullback Scanner ({interval})…")
@@ -340,8 +352,8 @@ def run_pullback_scanner(interval="1m"):
 
         last = df.iloc[-1]
 
-        # Simple pullback logic: strong trend, price near EMA9
-        if last["TrendStrong"] and last["Close"] >= last["EMA9"] * 0.995 and last["Close"] <= last["EMA9"] * 1.01:
+        # Pullback logic
+        if last["TrendStrong"] and last["EMA9"] * 0.995 <= last["Close"] <= last["EMA9"] * 1.01:
             results.append({
                 "Ticker": ticker,
                 "Price": round(last_price, 2),
