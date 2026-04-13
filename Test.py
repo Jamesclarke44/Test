@@ -415,3 +415,499 @@ def run_gap_scanner():
     df = df.sort_values("Gap Strength", ascending=False)
     df.reset_index(drop=True, inplace=True)
     return df
+# ============================================================
+#   ROSS CAMERON COMBINED SCANNER — PART 4/6
+#   MOMENTUM SCANNER (1-MIN + 5-MIN)
+# ============================================================
+
+# ------------------------------------------------------------
+#   TREND ENGINE (EMA9, EMA20, VWAP)
+# ------------------------------------------------------------
+
+def compute_trend_metrics(df):
+    """Adds EMA9, EMA20, VWAP, and trend strength."""
+    if df is None or df.empty:
+        return None
+
+    df = df.copy()
+    df["EMA9"] = ema(df["Close"], 9)
+    df["EMA20"] = ema(df["Close"], 20)
+    df["VWAP"] = vwap(df)
+
+    # Trend strength: EMA9 > EMA20 and price > VWAP
+    df["TrendStrong"] = (df["EMA9"] > df["EMA20"]) & (df["Close"] > df["VWAP"])
+    return df
+
+def compute_momentum_score(df):
+    """
+    Ross-style momentum score:
+    - EMA9 > EMA20
+    - Price > VWAP
+    - Higher highs
+    - Volume expansion
+    """
+    if df is None or df.empty:
+        return 0
+
+    last = df.iloc[-1]
+
+    score = 0
+    if last["EMA9"] > last["EMA20"]:
+        score += 2
+    if last["Close"] > last["VWAP"]:
+        score += 2
+
+    # Higher highs
+    if len(df) > 3:
+        if df["High"].iloc[-1] > df["High"].iloc[-2]:
+            score += 1
+        if df["High"].iloc[-2] > df["High"].iloc[-3]:
+            score += 1
+
+    # Volume expansion
+    if len(df) > 5:
+        if df["Volume"].iloc[-1] > df["Volume"].iloc[-2]:
+            score += 1
+
+    return score
+
+# ------------------------------------------------------------
+#   NEW HIGH OF DAY DETECTION
+# ------------------------------------------------------------
+
+def is_new_hod(df):
+    """Returns True if the last candle is a new high of day."""
+    if df is None or df.empty:
+        return False
+    return df["High"].iloc[-1] >= df["High"].max()
+
+# ------------------------------------------------------------
+#   MOMENTUM SCANNER CORE
+# ------------------------------------------------------------
+
+def run_momentum_scanner(interval="1m"):
+    """
+    Ross-style Momentum Scanner:
+    - New HOD
+    - RVOL > 3×
+    - Float < 50M
+    - Price $2–$20
+    - Trend strong (EMA9 > EMA20, price > VWAP)
+    """
+    st.write(f"⚡ Running Momentum Scanner ({interval})…")
+
+    # --------------------------------------------------------
+    # STEP 1 — Filter universe by float < 50M
+    # --------------------------------------------------------
+    float_pass = [t for t in TICKERS if passes_float_filter(t)]
+    if not float_pass:
+        return pd.DataFrame()
+
+    # --------------------------------------------------------
+    # STEP 2 — Download daily data for RVOL
+    # --------------------------------------------------------
+    daily = download_daily_data(float_pass)
+    if daily is None:
+        return pd.DataFrame()
+
+    # --------------------------------------------------------
+    # STEP 3 — Download intraday data (1m or 5m)
+    # --------------------------------------------------------
+    intraday = download_intraday_batches(float_pass, interval=interval, period="1d")
+
+    results = []
+
+    for ticker in float_pass:
+        # ----------------------------------------------------
+        # Extract daily candles
+        # ----------------------------------------------------
+        try:
+            d = daily[ticker]
+        except Exception:
+            continue
+
+        if d is None or d.empty or len(d) < 21:
+            continue
+
+        today_volume = d["Volume"].iloc[-1]
+        avg20_volume = d["Volume"].iloc[-21:-1].mean()
+        rvol = compute_rvol(today_volume, avg20_volume)
+        if rvol < 3:
+            continue
+
+        # ----------------------------------------------------
+        # Extract intraday data
+        # ----------------------------------------------------
+        df = intraday.get(ticker)
+        if df is None or df.empty:
+            continue
+
+        # ----------------------------------------------------
+        # Price filter
+        # ----------------------------------------------------
+        last_price = df["Close"].iloc[-1]
+        if last_price < 2 or last_price > 20:
+            continue
+
+        # ----------------------------------------------------
+        # Trend metrics
+        # ----------------------------------------------------
+        df = compute_trend_metrics(df)
+        if df is None:
+            continue
+
+        # ----------------------------------------------------
+        # Must be trending strong
+        # ----------------------------------------------------
+        if not df["TrendStrong"].iloc[-1]:
+            continue
+
+        # ----------------------------------------------------
+        # Must be making new HOD
+        # ----------------------------------------------------
+        if not is_new_hod(df):
+            continue
+
+        # ----------------------------------------------------
+        # Compute momentum score
+        # ----------------------------------------------------
+        score = compute_momentum_score(df)
+
+        results.append({
+            "Ticker": ticker,
+            "Price": round(last_price, 2),
+            "RVOL": round(rvol, 2),
+            "Trend Strong": "Yes",
+            "New HOD": "Yes",
+            "Momentum Score": score
+        })
+
+    if not results:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(results)
+    df = df.sort_values("Momentum Score", ascending=False)
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+# ------------------------------------------------------------
+#   PUBLIC FUNCTIONS FOR UI
+# ------------------------------------------------------------
+
+def run_momentum_1m():
+    return run_momentum_scanner(interval="1m")
+
+def run_momentum_5m():
+    return run_momentum_scanner(interval="5m")
+# ============================================================
+#   ROSS CAMERON COMBINED SCANNER — PART 5/6
+#   MICRO-PULLBACK SCANNER (1-MIN + 5-MIN)
+# ============================================================
+
+# ------------------------------------------------------------
+#   PULLBACK DETECTION ENGINE
+# ------------------------------------------------------------
+
+def detect_pullback(df):
+    """
+    Detects a Ross-style micro-pullback:
+    - 1–3 candle pullback
+    - Pullback to EMA9 or EMA20
+    - Volume contraction
+    - Trend intact
+    """
+    if df is None or df.empty or len(df) < 10:
+        return False
+
+    df = df.copy()
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
+
+    # Trend must be intact
+    if not last["TrendStrong"]:
+        return False
+
+    # Pullback candles must be red or small-bodied
+    pullback_candles = [
+        prev["Close"] < prev["Open"],
+        prev2["Close"] < prev2["Open"]
+    ]
+    if not any(pullback_candles):
+        return False
+
+    # Pullback depth: price near EMA9 or EMA20
+    near_ema9 = abs(prev["Close"] - prev["EMA9"]) / prev["EMA9"] < 0.01
+    near_ema20 = abs(prev["Close"] - prev["EMA20"]) / prev["EMA20"] < 0.01
+    if not (near_ema9 or near_ema20):
+        return False
+
+    # Volume contraction
+    if prev["Volume"] > df["Volume"].iloc[-4]:
+        return False
+
+    return True
+
+# ------------------------------------------------------------
+#   PULLBACK QUALITY SCORE
+# ------------------------------------------------------------
+
+def compute_pullback_score(df):
+    """
+    Ross-style pullback score:
+    - Trend intact
+    - Pullback depth
+    - Volume contraction
+    - Breakout potential
+    """
+    if df is None or df.empty:
+        return 0
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    score = 0
+
+    # Trend intact
+    if last["TrendStrong"]:
+        score += 2
+
+    # Pullback depth (closer to EMA9 = better)
+    depth = abs(prev["Close"] - prev["EMA9"]) / prev["EMA9"]
+    if depth < 0.01:
+        score += 2
+    elif depth < 0.02:
+        score += 1
+
+    # Volume contraction
+    if prev["Volume"] < df["Volume"].iloc[-4]:
+        score += 1
+
+    # Breakout potential (price > VWAP)
+    if last["Close"] > last["VWAP"]:
+        score += 1
+
+    return score
+
+# ------------------------------------------------------------
+#   MICRO-PULLBACK SCANNER CORE
+# ------------------------------------------------------------
+
+def run_pullback_scanner(interval="1m"):
+    """
+    Ross-style Micro-Pullback Scanner:
+    - Trend intact (EMA9 > EMA20, price > VWAP)
+    - 1–3 candle pullback
+    - Volume contraction
+    - Price $2–$20
+    - RVOL > 3×
+    """
+    st.write(f"📉 Running Micro‑Pullback Scanner ({interval})…")
+
+    # --------------------------------------------------------
+    # STEP 1 — Filter universe by float < 50M
+    # --------------------------------------------------------
+    float_pass = [t for t in TICKERS if passes_float_filter(t)]
+    if not float_pass:
+        return pd.DataFrame()
+
+    # --------------------------------------------------------
+    # STEP 2 — Daily data for RVOL
+    # --------------------------------------------------------
+    daily = download_daily_data(float_pass)
+    if daily is None:
+        return pd.DataFrame()
+
+    # --------------------------------------------------------
+    # STEP 3 — Intraday data (1m or 5m)
+    # --------------------------------------------------------
+    intraday = download_intraday_batches(float_pass, interval=interval, period="1d")
+
+    results = []
+
+    for ticker in float_pass:
+        # ----------------------------------------------------
+        # Daily RVOL
+        # ----------------------------------------------------
+        try:
+            d = daily[ticker]
+        except Exception:
+            continue
+
+        if d is None or d.empty or len(d) < 21:
+            continue
+
+        today_volume = d["Volume"].iloc[-1]
+        avg20_volume = d["Volume"].iloc[-21:-1].mean()
+        rvol = compute_rvol(today_volume, avg20_volume)
+        if rvol < 3:
+            continue
+
+        # ----------------------------------------------------
+        # Intraday data
+        # ----------------------------------------------------
+        df = intraday.get(ticker)
+        if df is None or df.empty:
+            continue
+
+        last_price = df["Close"].iloc[-1]
+        if last_price < 2 or last_price > 20:
+            continue
+
+        # ----------------------------------------------------
+        # Trend metrics
+        # ----------------------------------------------------
+        df = compute_trend_metrics(df)
+        if df is None:
+            continue
+
+        # ----------------------------------------------------
+        # Pullback detection
+        # ----------------------------------------------------
+        if not detect_pullback(df):
+            continue
+
+        # ----------------------------------------------------
+        # Pullback score
+        # ----------------------------------------------------
+        score = compute_pullback_score(df)
+
+        results.append({
+            "Ticker": ticker,
+            "Price": round(last_price, 2),
+            "RVOL": round(rvol, 2),
+            "Trend Strong": "Yes",
+            "Pullback": "Yes",
+            "Pullback Score": score
+        })
+
+    if not results:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(results)
+    df = df.sort_values("Pullback Score", ascending=False)
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+# ------------------------------------------------------------
+#   PUBLIC FUNCTIONS FOR UI
+# ------------------------------------------------------------
+
+def run_pullback_1m():
+    return run_pullback_scanner(interval="1m")
+
+def run_pullback_5m():
+    return run_pullback_scanner(interval="5m")
+# ============================================================
+#   ROSS CAMERON COMBINED SCANNER — PART 6/6
+#   STREAMLIT UI + APP ROUTING
+# ============================================================
+
+st.title("📈 Ross Cameron Combined Scanner")
+st.caption("Live Intraday • Full Small‑Cap Universe • Catalyst‑Aware • 1m + 5m")
+
+# ------------------------------------------------------------
+#   SHOW CURRENT TIME (EST + Calgary)
+# ------------------------------------------------------------
+
+now_est = get_est_time()
+now_calgary = datetime.datetime.now(pytz.timezone("America/Edmonton"))
+
+st.sidebar.markdown("### 🕒 Current Time")
+st.sidebar.write(f"**Calgary (Local):** {now_calgary.strftime('%Y-%m-%d %H:%M:%S')}")
+st.sidebar.write(f"**Eastern Time:** {now_est.strftime('%Y-%m-%d %H:%M:%S')}")
+
+market_mode = "Pre‑Market" if is_premarket() else "Intraday"
+st.sidebar.markdown(f"### 📌 Market Mode: **{market_mode}**")
+
+# ------------------------------------------------------------
+#   MANUAL REFRESH BUTTON
+# ------------------------------------------------------------
+
+run_scan = st.sidebar.button("🔄 Scan Now")
+
+# ------------------------------------------------------------
+#   PRE‑MARKET MODE → GAP SCANNER ONLY
+# ------------------------------------------------------------
+
+if is_premarket():
+
+    st.header("🚀 Gap Scanner (Strict Catalyst‑Only)")
+
+    if run_scan:
+        df = run_gap_scanner()
+        if df.empty:
+            st.warning("No qualifying gappers found.")
+        else:
+            st.dataframe(df, use_container_width=True)
+    else:
+        st.info("Click **Scan Now** to run the Gap Scanner.")
+
+# ------------------------------------------------------------
+#   INTRADAY MODE → MOMENTUM + PULLBACK SCANNERS
+# ------------------------------------------------------------
+
+else:
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "⚡ Momentum (1‑min)",
+        "⚡ Momentum (5‑min)",
+        "📉 Pullback (1‑min)",
+        "📉 Pullback (5‑min)"
+    ])
+
+    # ------------------------------
+    # MOMENTUM 1-MIN
+    # ------------------------------
+    with tab1:
+        st.subheader("⚡ Momentum Scanner — 1‑Minute")
+        if run_scan:
+            df = run_momentum_1m()
+            if df.empty:
+                st.warning("No momentum setups found.")
+            else:
+                st.dataframe(df, use_container_width=True)
+        else:
+            st.info("Click **Scan Now** to run the 1‑min Momentum Scanner.")
+
+    # ------------------------------
+    # MOMENTUM 5-MIN
+    # ------------------------------
+    with tab2:
+        st.subheader("⚡ Momentum Scanner — 5‑Minute")
+        if run_scan:
+            df = run_momentum_5m()
+            if df.empty:
+                st.warning("No momentum setups found.")
+            else:
+                st.dataframe(df, use_container_width=True)
+        else:
+            st.info("Click **Scan Now** to run the 5‑min Momentum Scanner.")
+
+    # ------------------------------
+    # PULLBACK 1-MIN
+    # ------------------------------
+    with tab3:
+        st.subheader("📉 Micro‑Pullback Scanner — 1‑Minute")
+        if run_scan:
+            df = run_pullback_1m()
+            if df.empty:
+                st.warning("No pullback setups found.")
+            else:
+                st.dataframe(df, use_container_width=True)
+        else:
+            st.info("Click **Scan Now** to run the 1‑min Pullback Scanner.")
+
+    # ------------------------------
+    # PULLBACK 5-MIN
+    # ------------------------------
+    with tab4:
+        st.subheader("📉 Micro‑Pullback Scanner — 5‑Minute")
+        if run_scan:
+            df = run_pullback_5m()
+            if df.empty:
+                st.warning("No pullback setups found.")
+            else:
+                st.dataframe(df, use_container_width=True)
+        else:
+            st.info("Click **Scan Now** to run the 5‑min Pullback Scanner.")
