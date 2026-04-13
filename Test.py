@@ -794,115 +794,141 @@ def run_pullback_1m():
 def run_pullback_5m():
     return run_pullback_scanner(interval="5m")
 # ============================================================
-#   STREAMLIT UI + APP ROUTING
+#   ROSS CAMERON COMBINED SCANNER — FINAL UI (SINGLE PAGE)
 # ============================================================
 
 st.title("📈 Ross Cameron Combined Scanner")
 st.caption("Live Intraday • Full Small‑Cap Universe • Catalyst‑Aware • 1m + 5m")
 
 # ------------------------------------------------------------
-#   SHOW CURRENT TIME (EST + Calgary)
+#   CURRENT TIME + MARKET MODE
 # ------------------------------------------------------------
 
 now_est = get_est_time()
 now_calgary = datetime.datetime.now(pytz.timezone("America/Edmonton"))
 
-st.sidebar.markdown("### 🕒 Current Time")
-st.sidebar.write(f"**Calgary (Local):** {now_calgary.strftime('%Y-%m-%d %H:%M:%S')}")
-st.sidebar.write(f"**Eastern Time:** {now_est.strftime('%Y-%m-%d %H:%M:%S')}")
+st.markdown(f"**Calgary:** {now_calgary.strftime('%Y-%m-%d %H:%M:%S')}")
+st.markdown(f"**Eastern Time:** {now_est.strftime('%Y-%m-%d %H:%M:%S')}")
 
 market_mode = "Pre‑Market" if is_premarket() else "Intraday"
-st.sidebar.markdown(f"### 📌 Market Mode: **{market_mode}**")
+st.markdown(f"**Market Mode:** {market_mode}")
 
 # ------------------------------------------------------------
-#   MANUAL REFRESH BUTTON
+#   TABS (ALWAYS VISIBLE)
 # ------------------------------------------------------------
 
-run_scan = st.sidebar.button("🔄 Scan Now")
+tab_gap, tab_m1, tab_m5, tab_p1, tab_p5 = st.tabs([
+    "🚀 Gap Scanner",
+    "⚡ Momentum 1‑min",
+    "⚡ Momentum 5‑min",
+    "📉 Pullback 1‑min",
+    "📉 Pullback 5‑min"
+])
 
 # ------------------------------------------------------------
-#   PRE‑MARKET MODE → GAP SCANNER ONLY
+#   SESSION STATE FOR RESULTS
 # ------------------------------------------------------------
 
-if is_premarket():
+if "results" not in st.session_state:
+    st.session_state["results"] = {
+        "gap": None,
+        "m1": None,
+        "m5": None,
+        "p1": None,
+        "p5": None
+    }
 
-    st.header("🚀 Gap Scanner (Strict Catalyst‑Only)")
+# ------------------------------------------------------------
+#   SCAN BUTTON (RUNS ONLY ACTIVE TAB)
+# ------------------------------------------------------------
 
-    if run_scan:
-        df = run_gap_scanner()
+scan_now = st.button("🔄 Scan Now")
+
+# ------------------------------------------------------------
+#   TAB 1 — GAP SCANNER
+# ------------------------------------------------------------
+
+with tab_gap:
+    st.subheader("🚀 Gap Scanner (Strict Catalyst‑Only)")
+
+    if scan_now:
+        if is_premarket():
+            st.session_state["results"]["gap"] = run_gap_scanner()
+        else:
+            st.session_state["results"]["gap"] = None
+            st.info("Gap Scanner only runs pre‑market (before 9:30 AM EST).")
+
+    df = st.session_state["results"]["gap"]
+    if df is not None:
         if df.empty:
             st.warning("No qualifying gappers found.")
         else:
             st.dataframe(df, use_container_width=True)
-    else:
-        st.info("Click **Scan Now** to run the Gap Scanner.")
 
 # ------------------------------------------------------------
-#   INTRADAY MODE → MOMENTUM + PULLBACK SCANNERS
+#   TAB 2 — MOMENTUM 1-MIN
 # ------------------------------------------------------------
 
-else:
+with tab_m1:
+    st.subheader("⚡ Momentum Scanner — 1‑Minute")
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "⚡ Momentum (1‑min)",
-        "⚡ Momentum (5‑min)",
-        "📉 Pullback (1‑min)",
-        "📉 Pullback (5‑min)"
-    ])
+    if scan_now:
+        st.session_state["results"]["m1"] = run_momentum_1m()
 
-    # ------------------------------
-    # MOMENTUM 1-MIN
-    # ------------------------------
-    with tab1:
-        st.subheader("⚡ Momentum Scanner — 1‑Minute")
-        if run_scan:
-            df = run_momentum_1m()
-            if df.empty:
-                st.warning("No momentum setups found.")
-            else:
-                st.dataframe(df, use_container_width=True)
+    df = st.session_state["results"]["m1"]
+    if df is not None:
+        if df.empty:
+            st.warning("No momentum setups found.")
         else:
-            st.info("Click **Scan Now** to run the 1‑min Momentum Scanner.")
+            st.dataframe(df, use_container_width=True)
 
-    # ------------------------------
-    # MOMENTUM 5-MIN
-    # ------------------------------
-    with tab2:
-        st.subheader("⚡ Momentum Scanner — 5‑Minute")
-        if run_scan:
-            df = run_momentum_5m()
-            if df.empty:
-                st.warning("No momentum setups found.")
-            else:
-                st.dataframe(df, use_container_width=True)
-        else:
-            st.info("Click **Scan Now** to run the 5‑min Momentum Scanner.")
+# ------------------------------------------------------------
+#   TAB 3 — MOMENTUM 5-MIN
+# ------------------------------------------------------------
 
-    # ------------------------------
-    # PULLBACK 1-MIN
-    # ------------------------------
-    with tab3:
-        st.subheader("📉 Micro‑Pullback Scanner — 1‑Minute")
-        if run_scan:
-            df = run_pullback_1m()
-            if df.empty:
-                st.warning("No pullback setups found.")
-            else:
-                st.dataframe(df, use_container_width=True)
-        else:
-            st.info("Click **Scan Now** to run the 1‑min Pullback Scanner.")
+with tab_m5:
+    st.subheader("⚡ Momentum Scanner — 5‑Minute")
 
-    # ------------------------------
-    # PULLBACK 5-MIN
-    # ------------------------------
-    with tab4:
-        st.subheader("📉 Micro‑Pullback Scanner — 5‑Minute")
-        if run_scan:
-            df = run_pullback_5m()
-            if df.empty:
-                st.warning("No pullback setups found.")
-            else:
-                st.dataframe(df, use_container_width=True)
+    if scan_now:
+        st.session_state["results"]["m5"] = run_momentum_5m()
+
+    df = st.session_state["results"]["m5"]
+    if df is not None:
+        if df.empty:
+            st.warning("No momentum setups found.")
         else:
-            st.info("Click **Scan Now** to run the 5‑min Pullback Scanner.")
-            
+            st.dataframe(df, use_container_width=True)
+
+# ------------------------------------------------------------
+#   TAB 4 — PULLBACK 1-MIN
+# ------------------------------------------------------------
+
+with tab_p1:
+    st.subheader("📉 Micro‑Pullback Scanner — 1‑Minute")
+
+    if scan_now:
+        st.session_state["results"]["p1"] = run_pullback_1m()
+
+    df = st.session_state["results"]["p1"]
+    if df is not None:
+        if df.empty:
+            st.warning("No pullback setups found.")
+        else:
+            st.dataframe(df, use_container_width=True)
+
+# ------------------------------------------------------------
+#   TAB 5 — PULLBACK 5-MIN
+# ------------------------------------------------------------
+
+with tab_p5:
+    st.subheader("📉 Micro‑Pullback Scanner — 5‑Minute")
+
+    if scan_now:
+        st.session_state["results"]["p5"] = run_pullback_5m()
+
+    df = st.session_state["results"]["p5"]
+    if df is not None:
+        if df.empty:
+            st.warning("No pullback setups found.")
+        else:
+            st.dataframe(df, use_container_width=True)
