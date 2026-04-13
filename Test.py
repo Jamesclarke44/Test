@@ -26,23 +26,52 @@ MIN_AVG_VOLUME = 1_000_000
 
 @st.cache_data(show_spinner=True)
 def load_universe():
-    # Load S&P 500
-    sp500 = pd.read_csv(
-        "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents_symbols.csv"
-    )["Symbol"].dropna().tolist()
+    tickers = [
+        "AAPL","MSFT","AMZN","GOOGL","GOOG","META","NVDA","TSLA","BRK-B","UNH","XOM",
+        "JNJ","JPM","V","PG","MA","HD","CVX","ABBV","LLY","PEP","COST","MRK","AVGO",
+        "WMT","KO","MCD","BAC","PFE","T","CSCO","ADBE","CRM","NFLX","INTC","CMCSA",
+        "ABT","WFC","ACN","DHR","NEE","LIN","TXN","UPS","PM","LOW","IBM","HON","CAT",
+        "RTX","GS","CVS","QCOM","AMD","ORCL","AMAT","BLK","MDT","SPGI","ISRG","NOW",
+        "BKNG","GE","LMT","SYK","DE","MMC","MDLZ","AMGN","TMO","SCHW","AXP","GILD",
+        "PLD","MO","C","USB","CB","ZTS","CI","REGN","VRTX","SO","DUK","BDX","PNC",
+        "ICE","AON","APD","CL","SHW","ETN","NSC","CSX","FDX","GM","F","DAL","UAL",
+        "AAL","MAR","HLT","EXPE","EBAY","PYPL","SQ","SHOP","ROKU","SNAP","UBER",
+        "LYFT","TWLO","NET","DDOG","ZS","CRWD","PANW","OKTA","TEAM","MDB","SNOW",
+        "PLTR","RBLX","DKNG","NKE","LULU","TJX","TGT","BBY","ROST","DG","DLTR","KR",
+        "SBUX","YUM","CMG","DPZ","MNST","KDP","GIS","K","CLX","EL","COTY","XEL","ED",
+        "D","AEP","SRE","PCG","EIX","FE","PPL","TMUS","CHTR","DIS","PARA","WBD",
+        "FOX","FOXA","APA","HAL","SLB","BKR","PSX","MPC","VLO","OXY","EOG","PXD",
+        "CTRA","HES","COF","DFS","ALLY","MS","TD","RY","BMO","BNS","TRU","EFX",
+        "EQIX","DLR","SBAC","CCI","ARE","AVB","EQR","ESS","UDR","MAA","O","SPG",
+        "VTR","PEAK","WELL","IRM","STX","WDC","NTAP","HPE","HPQ","DELL","CSGP",
+        "CPRT","CTAS","ADP","PAYX","JKHY","FIS","FISV","FLT","BR","VRSK","IT","CDW",
+        "ANSS","SNPS","CDNS","KEYS","TER","LRCX","KLAC","ASML","TSM","ADI","MCHP",
+        "ON","SWKS","QRVO","MPWR","NXPI","ALGN","ILMN","IDXX","MTD","A","PKI","TECH",
+        "WAT","BSX","BAX","EW","XRAY","HSIC","STE","TFX","COO","ABMD","HCA","UHS",
+        "UNM","PRU","MET","AFL","GL","VOYA","AMP","ALL","TRV","WRB","RE","AJG",
+        "AIG","WLTW","BRK-A","SPGI","MCO","NDAQ","CME","MSCI","IVZ","TROW","BEN",
+        "STT","NTRS","CP","CSX","NSC","UNP","JBHT","ODFL","CHRW","EXPD","UPS","FDX",
+        "UAL","DAL","AAL","LUV","ALK","HA","CPA","BA","GD","NOC","LHX","TXT","HEI",
+        "TDG","SPR","ETR","PEG","ES","DTE","NRG","EXC","AWK","WTRG","XYL","PNR",
+        "ROK","EMR","AME","ITW","PH","SWK","TT","CARR","OTIS","IR","AWI","OC","MLM",
+        "VMC","EXP","CRH","APG","BLD","ALLE","FBHS","WHR","NWL","LEG","TPX","SNBR",
+        "PRPL","ETSY","W","OSTK","WSM","BURL","KSS","JWN","M","GME","AN","AZO",
+        "ORLY","AAP","TSCO","UL","KMB","CHD","REV","IPAR","ACI","SFM","IMKTA","GO",
+        "CASY","TSN","HRL","SAFM","PPC","HSY","CPB","STZ","BF-B","TAP","CCEP",
+        "RIVN","LCID","NIO","XPEV","LI","FSR","WKHS","GOEV","QS","BLNK","CHPT",
+        "RUN","SEDG","ENPH","FSLR","SPWR","NOVA","ARRY","BE","PLUG","BEP","NEE",
+        "SRE","DUK","SO","AEP","XEL","ED","D","FE","PPL","NRG","EXC","PCG","EIX",
+        "AMT","EQIX","DLR","IRM","PLD","SPG","O","ARE","AVB","EQR","ESS","UDR",
+        "MAA","VTR","PEAK","WELL","REG","FRT","KIM","BRX","ROIC","STOR","NNN",
+        "ADC","GTY","PSA","CUBE","EXR","LSI","NSA","WY","RYN","PCH","CF","ADM",
+        "BG","INGR","SMG","MOS","NTR","CTVA","DE","AGCO","TTC","MTZ","PWR","FLR",
+        "J","ACM","KBR","URI","ASH","ALB","LTHM","SQM","FCX","SCCO","NEM","GOLD",
+        "AEM","WPM","PAAS","HL","AA","CENX","STLD","NUE","X","CLF","CMC","RS",
+        "PKG","WRK","IP","SEE","AVY","OI","BLL","CCK","SON","AMCR"
+    ]
 
-    # Load Russell 1000
-    russell1000 = pd.read_csv(
-        "https://raw.githubusercontent.com/datasets/russell-1000/master/data/russell1000.csv"
-    )["Ticker"].dropna().tolist()
-
-    tickers = pd.Series(sp500 + russell1000).dropna().unique().tolist()
-
-    # Clean tickers for yfinance
     cleaned = [t.replace(".", "-").upper() for t in tickers]
-
     return sorted(list(set(cleaned)))
-
 
 # ------------------ INDICATORS ------------------
 
