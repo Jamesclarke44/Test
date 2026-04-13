@@ -536,6 +536,9 @@ def run_momentum_scanner(interval="1m"):
         # Extract intraday data
         # ----------------------------------------------------
         df = intraday.get(ticker)
+        print("MOMENTUM SCAN — Ticker:", ticker)
+        print(df.head())
+
         if df is None or df.empty:
             continue
 
