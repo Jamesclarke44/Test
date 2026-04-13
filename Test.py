@@ -1,5 +1,4 @@
 # ============================================================
-#   ROSS CAMERON COMBINED SCANNER — PART 1/6
 #   Imports, Config, Universe, Utilities, Caching
 # ============================================================
 
@@ -136,7 +135,6 @@ def download_intraday_batches(tickers, interval="1m", period="1d", batch_size=50
 
     return results
 # ============================================================
-#   ROSS CAMERON COMBINED SCANNER — PART 2/6
 #   Catalyst Engine, Float Engine, Daily Data Engine,
 #   Full 3,000‑Ticker Universe
 # ============================================================
@@ -270,7 +268,6 @@ TICKERS = [
     # --------------------------------------------------------
 ]
 # ============================================================
-#   ROSS CAMERON COMBINED SCANNER — PART 3/6
 #   GAP SCANNER ENGINE (STRICT CATALYST-ONLY)
 # ============================================================
 
@@ -416,7 +413,6 @@ def run_gap_scanner():
     df.reset_index(drop=True, inplace=True)
     return df
 # ============================================================
-#   ROSS CAMERON COMBINED SCANNER — PART 4/6
 #   MOMENTUM SCANNER (1-MIN + 5-MIN)
 # ============================================================
 
@@ -600,7 +596,6 @@ def run_momentum_1m():
 def run_momentum_5m():
     return run_momentum_scanner(interval="5m")
 # ============================================================
-#   ROSS CAMERON COMBINED SCANNER — PART 5/6
 #   MICRO-PULLBACK SCANNER (1-MIN + 5-MIN)
 # ============================================================
 
@@ -799,7 +794,6 @@ def run_pullback_1m():
 def run_pullback_5m():
     return run_pullback_scanner(interval="5m")
 # ============================================================
-#   ROSS CAMERON COMBINED SCANNER — PART 6/6
 #   STREAMLIT UI + APP ROUTING
 # ============================================================
 
