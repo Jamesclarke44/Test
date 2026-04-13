@@ -793,8 +793,9 @@ def run_pullback_1m():
 
 def run_pullback_5m():
     return run_pullback_scanner(interval="5m")
+    
 # ============================================================
-#   ROSS CAMERON COMBINED SCANNER — FINAL UI (SINGLE PAGE)
+#   ROSS CAMERON COMBINED SCANNER — FINAL UI (PER-TAB SCAN)
 # ============================================================
 
 st.title("📈 Ross Cameron Combined Scanner")
@@ -814,18 +815,6 @@ market_mode = "Pre‑Market" if is_premarket() else "Intraday"
 st.markdown(f"**Market Mode:** {market_mode}")
 
 # ------------------------------------------------------------
-#   TABS (ALWAYS VISIBLE)
-# ------------------------------------------------------------
-
-tab_gap, tab_m1, tab_m5, tab_p1, tab_p5 = st.tabs([
-    "🚀 Gap Scanner",
-    "⚡ Momentum 1‑min",
-    "⚡ Momentum 5‑min",
-    "📉 Pullback 1‑min",
-    "📉 Pullback 5‑min"
-])
-
-# ------------------------------------------------------------
 #   SESSION STATE FOR RESULTS
 # ------------------------------------------------------------
 
@@ -839,10 +828,16 @@ if "results" not in st.session_state:
     }
 
 # ------------------------------------------------------------
-#   SCAN BUTTON (RUNS ONLY ACTIVE TAB)
+#   TABS
 # ------------------------------------------------------------
 
-scan_now = st.button("🔄 Scan Now")
+tab_gap, tab_m1, tab_m5, tab_p1, tab_p5 = st.tabs([
+    "🚀 Gap Scanner",
+    "⚡ Momentum 1‑min",
+    "⚡ Momentum 5‑min",
+    "📉 Pullback 1‑min",
+    "📉 Pullback 5‑min"
+])
 
 # ------------------------------------------------------------
 #   TAB 1 — GAP SCANNER
@@ -851,7 +846,7 @@ scan_now = st.button("🔄 Scan Now")
 with tab_gap:
     st.subheader("🚀 Gap Scanner (Strict Catalyst‑Only)")
 
-    if scan_now:
+    if st.button("🔄 Scan Gap Scanner", key="scan_gap"):
         if is_premarket():
             st.session_state["results"]["gap"] = run_gap_scanner()
         else:
@@ -872,7 +867,7 @@ with tab_gap:
 with tab_m1:
     st.subheader("⚡ Momentum Scanner — 1‑Minute")
 
-    if scan_now:
+    if st.button("🔄 Scan Momentum 1‑min", key="scan_m1"):
         st.session_state["results"]["m1"] = run_momentum_1m()
 
     df = st.session_state["results"]["m1"]
@@ -889,7 +884,7 @@ with tab_m1:
 with tab_m5:
     st.subheader("⚡ Momentum Scanner — 5‑Minute")
 
-    if scan_now:
+    if st.button("🔄 Scan Momentum 5‑min", key="scan_m5"):
         st.session_state["results"]["m5"] = run_momentum_5m()
 
     df = st.session_state["results"]["m5"]
@@ -906,7 +901,7 @@ with tab_m5:
 with tab_p1:
     st.subheader("📉 Micro‑Pullback Scanner — 1‑Minute")
 
-    if scan_now:
+    if st.button("🔄 Scan Pullback 1‑min", key="scan_p1"):
         st.session_state["results"]["p1"] = run_pullback_1m()
 
     df = st.session_state["results"]["p1"]
@@ -923,7 +918,7 @@ with tab_p1:
 with tab_p5:
     st.subheader("📉 Micro‑Pullback Scanner — 5‑Minute")
 
-    if scan_now:
+    if st.button("🔄 Scan Pullback 5‑min", key="scan_p5"):
         st.session_state["results"]["p5"] = run_pullback_5m()
 
     df = st.session_state["results"]["p5"]
