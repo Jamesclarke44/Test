@@ -815,6 +815,60 @@ market_mode = "Pre‑Market" if is_premarket() else "Intraday"
 st.markdown(f"**Market Mode:** {market_mode}")
 
 # ------------------------------------------------------------
+#   SETTINGS PANEL + RESTORE DEFAULTS
+# ------------------------------------------------------------
+
+DEFAULT_SETTINGS = {
+    "float_max": 50_000_000,
+    "min_rvol": 3.0,
+    "price_min": 2.0,
+    "price_max": 20.0,
+    "require_catalyst": True,
+    "min_gap_pct": 5.0,
+    "trend_strict": True
+}
+
+if "settings" not in st.session_state:
+    st.session_state.settings = DEFAULT_SETTINGS.copy()
+
+with st.expander("⚙️ Scanner Settings", expanded=False):
+
+    st.write("Adjust your scanner criteria. Click **Restore Defaults** to return to Ross-style settings.")
+
+    st.session_state.settings["float_max"] = st.number_input(
+        "Max Float", value=st.session_state.settings["float_max"], step=1_000_000
+    )
+
+    st.session_state.settings["min_rvol"] = st.number_input(
+        "Minimum RVOL", value=st.session_state.settings["min_rvol"], step=0.5
+    )
+
+    st.session_state.settings["price_min"] = st.number_input(
+        "Minimum Price", value=st.session_state.settings["price_min"], step=0.5
+    )
+
+    st.session_state.settings["price_max"] = st.number_input(
+        "Maximum Price", value=st.session_state.settings["price_max"], step=0.5
+    )
+
+    st.session_state.settings["min_gap_pct"] = st.number_input(
+        "Minimum Gap % (pre-market)", value=st.session_state.settings["min_gap_pct"], step=1.0
+    )
+
+    st.session_state.settings["require_catalyst"] = st.checkbox(
+        "Require Fresh Catalyst (pre-market)", value=st.session_state.settings["require_catalyst"]
+    )
+
+    st.session_state.settings["trend_strict"] = st.checkbox(
+        "Strict Trend Rules (EMA9 > EMA20, Price > VWAP)",
+        value=st.session_state.settings["trend_strict"]
+    )
+
+    if st.button("🔄 Restore Default Ross Criteria"):
+        st.session_state.settings = DEFAULT_SETTINGS.copy()
+        st.success("Default Ross-style criteria restored.")
+
+# ------------------------------------------------------------
 #   SESSION STATE FOR RESULTS
 # ------------------------------------------------------------
 
@@ -847,11 +901,7 @@ with tab_gap:
     st.subheader("🚀 Gap Scanner (Strict Catalyst‑Only)")
 
     if st.button("🔄 Scan Gap Scanner", key="scan_gap"):
-        if is_premarket():
-            st.session_state["results"]["gap"] = run_gap_scanner()
-        else:
-            st.session_state["results"]["gap"] = None
-            st.info("Gap Scanner only runs pre‑market (before 9:30 AM EST).")
+        st.session_state["results"]["gap"] = run_gap_scanner()
 
     df = st.session_state["results"]["gap"]
     if df is not None:
