@@ -1,278 +1,320 @@
+# app.py
+# -----------------------------------------
+# Simple EOD swing-trade scanner:
+# - U.S. stocks
+# - Long-only
+# - Uptrend + pullback + momentum turn
+# - Ranks best "buy low, sell high" setups
+# -----------------------------------------
+
+import datetime as dt
+import math
+
+import numpy as np
+import pandas as pd
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-import matplotlib.pyplot as plt
 
-from ta.momentum import RSIIndicator
-from ta.trend import ADXIndicator
-from ta.volatility import BollingerBands
-from ta.volume import VolumeWeightedAveragePrice
 
-st.set_page_config(page_title="Options Trading System", layout="wide")
+# ------------- CONFIG --------------------
 
-st.title("🧠 Options Trading System (Scanner + Analyzer + Exit Engine)")
+# TODO: Replace this with your full universe:
+# e.g., S&P 500 + mid-caps + Russell 1000 tickers from a file or API.
+UNIVERSE_TICKERS = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM", "UNH", "XOM",
+    "HD", "PG", "V", "MA", "AVGO", "LLY", "PEP", "COST", "ABBV", "MRK"
+]
 
-# ---------------- SAFE FLOAT ----------------
-def safe_float(val):
-    try:
-        if isinstance(val, pd.Series):
-            return float(val.iloc[0])
-        return float(val)
-    except:
-        return None
+START_DAYS_BACK = 250  # ~1 year of data
+MIN_PRICE = 10
+MAX_PRICE = 200
+MIN_AVG_VOLUME = 1_000_000
+MIN_MARKET_CAP = 2_000_000_000  # 2B
 
-# ---------------- UNIVERSE ----------------
-@st.cache_data
-def load_universe():
-    return [
-        "SPY","QQQ","IWM","DIA","VTI","XLF","XLK","XLE","XLV",
-        "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA",
-        "AMD","CRM","ORCL","ADBE","CSCO","JPM","BAC","GS",
-        "WMT","COST","HD","NKE","SBUX","MCD","JNJ","UNH",
-        "XOM","CVX","CAT","GE","VZ","T","PG","KO","PEP",
-        "PLTR","COIN","RIOT","MARA","SOFI","SHOP","UBER"
-    ]
 
-# ---------------- DATA ----------------
-@st.cache_data
-def get_data(symbol):
-    try:
-        df = yf.download(symbol, period="6mo", interval="1d", progress=False, auto_adjust=True)
-        if df is None or df.empty:
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df.dropna()
-    except:
-        return None
+# ------------- INDICATOR HELPERS --------------------
 
-# ---------------- INDICATORS ----------------
-def add_indicators(df):
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
 
-    close = df["Close"]
+    gain_ema = pd.Series(gain, index=series.index).ewm(alpha=1/period, adjust=False).mean()
+    loss_ema = pd.Series(loss, index=series.index).ewm(alpha=1/period, adjust=False).mean()
+
+    rs = gain_ema / loss_ema
+    rsi_val = 100 - (100 / (1 + rs))
+    return rsi_val
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high = df["High"]
     low = df["Low"]
-    volume = df["Volume"]
+    close = df["Close"]
 
-    df["RSI"] = RSIIndicator(close=close).rsi()
-    df["ADX"] = ADXIndicator(high=high, low=low, close=close).adx()
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
-    bb = BollingerBands(close=close)
-    df["BB_High"] = bb.bollinger_hband()
-    df["BB_Low"] = bb.bollinger_lband()
 
-    vwap = VolumeWeightedAveragePrice(
-        high=high, low=low, close=close, volume=volume
+# ------------- DATA LOADING --------------------
+
+@st.cache_data(show_spinner=True)
+def load_data(tickers, start, end):
+    data = yf.download(
+        tickers=tickers,
+        start=start,
+        end=end,
+        auto_adjust=False,
+        progress=False,
+        group_by="ticker"
     )
-    df["VWAP"] = vwap.volume_weighted_average_price()
+    return data
 
-    return df.dropna()
 
-# ---------------- ENTRY MODEL ----------------
-def is_A_plus_setup(price, rsi, adx, vwap, bb_low, bb_high):
+def flatten_yf_data(raw, tickers):
+    """
+    yfinance returns a multi-index DataFrame when multiple tickers are used.
+    This flattens it into a long DataFrame with columns:
+    ['Ticker', 'Date', 'Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
+    """
+    records = []
+    for t in tickers:
+        if t not in raw.columns.levels[0]:
+            continue
+        df_t = raw[t].copy()
+        df_t["Ticker"] = t
+        df_t = df_t.reset_index().rename(columns={"Date": "Date"})
+        records.append(df_t)
+    if not records:
+        return pd.DataFrame()
+    out = pd.concat(records, ignore_index=True)
+    return out
 
-    vwap_drift = abs(price - vwap) / price
 
-    if bb_high - bb_low == 0:
-        bb_position = 0.5
-    else:
-        bb_position = (price - bb_low) / (bb_high - bb_low)
+# ------------- UNIVERSE FILTERS --------------------
 
-    if (
-        40 <= rsi <= 60 and
-        adx < 25 and
-        vwap_drift <= 0.01 and
-        0.4 <= bb_position <= 0.6
-    ):
-        return True, bb_position, vwap_drift
+def filter_universe(df: pd.DataFrame) -> pd.DataFrame:
+    # Use last row per ticker to filter by price, volume, etc.
+    latest = df.sort_values("Date").groupby("Ticker").tail(1)
 
-    return False, bb_position, vwap_drift
+    # Price filter
+    price_mask = (latest["Close"] >= MIN_PRICE) & (latest["Close"] <= MAX_PRICE)
 
-# ---------------- EXIT ENGINE ----------------
-def exit_engine(rsi, adx, bb_position, vwap_drift):
+    # Volume filter (20d avg)
+    vol_20 = (
+        df.sort_values("Date")
+        .groupby("Ticker")["Volume"]
+        .rolling(20)
+        .mean()
+        .reset_index()
+        .rename(columns={"Volume": "Vol20"})
+    )
+    df = df.merge(vol_20, on=["Ticker", "level_1"], how="left") if "level_1" in vol_20.columns else df
 
-    # PRIORITY ORDER (real trading logic)
+    # Recompute latest with Vol20 if needed
+    latest = df.sort_values("Date").groupby("Ticker").tail(1)
+    vol_mask = latest["Volume"].rolling(20).mean() >= MIN_AVG_VOLUME if "Vol20" not in latest.columns else latest["Vol20"] >= MIN_AVG_VOLUME
 
-    if adx >= 25:
-        return "⚠️ EXIT — Trend forming (edge gone)"
+    # Market cap filter (approx via yfinance info)
+    # For simplicity, we skip strict market cap filtering here.
+    # You can pre-filter your universe externally by market cap.
 
-    if vwap_drift > 0.01:
-        return "⚠️ EXIT — Price leaving fair value"
+    keep_tickers = latest[price_mask & vol_mask]["Ticker"].unique()
+    return df[df["Ticker"].isin(keep_tickers)].copy()
 
-    if rsi < 40 or rsi > 60:
-        return "⚠️ EXIT — Lost neutrality"
 
-    if bb_position < 0.3 or bb_position > 0.7:
-        return "⚠️ EXIT — Range breaking"
+# ------------- INDICATOR ENGINE --------------------
 
-    return "✅ HOLD — Conditions intact"
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.sort_values(["Ticker", "Date"]).copy()
 
-# ---------------- EXIT CONFIDENCE ----------------
-def exit_confidence(rsi, adx, bb_position, vwap_drift):
+    out_frames = []
+    for t, g in df.groupby("Ticker"):
+        g = g.copy()
+        g["SMA20"] = g["Close"].rolling(20).mean()
+        g["SMA50"] = g["Close"].rolling(50).mean()
+        g["SMA200"] = g["Close"].rolling(200).mean()
+        g["EMA20"] = g["Close"].ewm(span=20, adjust=False).mean()
+        g["RSI14"] = rsi(g["Close"], 14)
+        g["ATR14"] = atr(g, 14)
+        g["ATR_PCT"] = g["ATR14"] / g["Close"]
+        g["Vol20"] = g["Volume"].rolling(20).mean()
+        out_frames.append(g)
+    out = pd.concat(out_frames, ignore_index=True)
+    return out
 
-    score = 0
 
-    if adx >= 25:
-        score += 2
-    if vwap_drift > 0.01:
-        score += 3
-    if rsi < 40 or rsi > 60:
-        score += 2
-    if bb_position < 0.3 or bb_position > 0.7:
-        score += 2
+# ------------- SIGNAL + SCORING --------------------
 
-    return score  # out of 9
+def evaluate_row(row, prev_rows):
+    """
+    Apply your long-only, incline + pullback + momentum rules
+    to the latest row for a ticker.
+    """
+    # Require enough history
+    if any(math.isnan(row.get(col, np.nan)) for col in ["SMA20", "SMA50", "SMA200", "RSI14", "ATR14", "Vol20"]):
+        return 0.0, False
 
-# ---------------- UI ----------------
-tab1, tab2 = st.tabs(["🔍 Scanner", "📈 Analyzer"])
+    close = row["Close"]
+    sma20 = row["SMA20"]
+    sma50 = row["SMA50"]
+    sma200 = row["SMA200"]
+    ema20 = row["EMA20"]
+    rsi14 = row["RSI14"]
+    atr_pct = row["ATR_PCT"]
+    vol = row["Volume"]
+    vol20 = row["Vol20"]
 
-# ================= SCANNER =================
-with tab1:
+    # Trend filter: incline
+    trend_ok = (close > sma20) and (sma20 > sma50) and (sma50 > sma200)
 
-    if st.button("Run Scan"):
+    # Pullback: touched EMA20/SMA20 in last 3–5 days
+    recent = prev_rows.tail(5).copy()
+    pullback_ok = False
+    if not recent.empty:
+        # price dipped to or below EMA20/SMA20
+        cond = (recent["Low"] <= recent["EMA20"]) | (recent["Low"] <= recent["SMA20"])
+        pullback_ok = cond.any()
 
-        tickers = load_universe()
+    # Momentum: RSI rising from 35–50 to >45
+    momentum_ok = False
+    if len(recent) >= 3:
+        rsi_recent = recent["RSI14"].dropna()
+        if len(rsi_recent) >= 3:
+            rsi_min = rsi_recent.min()
+            rsi_prev = rsi_recent.iloc[-1]
+            momentum_ok = (35 <= rsi_min <= 50) and (rsi14 > 45) and (rsi14 > rsi_prev)
 
-        progress = st.progress(0)
-        status = st.empty()
+    # Volume confirmation
+    vol_ok = (vol20 is not None) and (vol20 > 0) and (vol >= 1.2 * vol20)
 
-        results = []
+    # ATR sanity: between 1% and 5%
+    atr_ok = (atr_pct is not None) and (0.01 <= atr_pct <= 0.05)
 
-        for i, ticker in enumerate(tickers):
+    # Final "is setup" flag
+    is_setup = trend_ok and pullback_ok and momentum_ok and vol_ok and atr_ok
 
-            status.write(f"Scanning {ticker} ({i+1}/{len(tickers)})")
+    # Scoring
+    trend_score = 1.0 if trend_ok else 0.0
+    pullback_score = 1.0 if pullback_ok else 0.0
+    momentum_score = 1.0 if momentum_ok else 0.0
+    volume_score = 1.0 if vol_ok else 0.0
 
-            df = get_data(ticker)
-            if df is None:
-                continue
+    score = 0.4 * trend_score + 0.3 * pullback_score + 0.2 * momentum_score + 0.1 * volume_score
 
-            df = add_indicators(df)
-            last = df.iloc[-1]
+    return score, is_setup
 
-            price = safe_float(last["Close"])
-            rsi = safe_float(last["RSI"])
-            adx = safe_float(last["ADX"])
-            vwap = safe_float(last["VWAP"])
 
-            bb_low = last["BB_Low"]
-            bb_high = last["BB_High"]
+def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.sort_values(["Ticker", "Date"]).copy()
+    latest_rows = []
+    for t, g in df.groupby("Ticker"):
+        g = g.copy()
+        if len(g) < 60:
+            continue
+        last = g.iloc[-1]
+        prev = g.iloc[:-1]
+        score, is_setup = evaluate_row(last, prev)
+        last = last.copy()
+        last["Score"] = score
+        last["IsSetup"] = is_setup
+        latest_rows.append(last)
+    if not latest_rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(latest_rows)
+    out = out[out["IsSetup"]].sort_values("Score", ascending=False)
+    return out
 
-            if None in [price, rsi, adx, vwap]:
-                continue
 
-            valid, bb_pos, vwap_drift = is_A_plus_setup(
-                price, rsi, adx, vwap, bb_low, bb_high
+# ------------- STREAMLIT UI --------------------
+
+def main():
+    st.set_page_config(page_title="Swing Scanner - Long Only", layout="wide")
+    st.title("📈 EOD Swing Scanner (Long Only, Buy Low / Sell High)")
+
+    st.markdown(
+        "Scans U.S. stocks for **uptrends with pullbacks and momentum turning up**. "
+        "Educational use only — not financial advice."
+    )
+
+    # Sidebar controls
+    st.sidebar.header("Settings")
+    max_tickers = st.sidebar.slider("Max tickers to scan", 10, len(UNIVERSE_TICKERS), len(UNIVERSE_TICKERS), step=10)
+    universe = UNIVERSE_TICKERS[:max_tickers]
+
+    lookback_days = st.sidebar.slider("Lookback days", 120, 365, START_DAYS_BACK, step=10)
+    start_date = dt.date.today() - dt.timedelta(days=lookback_days)
+    end_date = dt.date.today()
+
+    st.sidebar.write(f"Scanning {len(universe)} tickers from {start_date} to {end_date}")
+
+    if st.sidebar.button("Run Scan"):
+        with st.spinner("Downloading data..."):
+            raw = load_data(universe, start_date, end_date)
+            if raw.empty:
+                st.error("No data returned. Check tickers or date range.")
+                return
+
+        df = flatten_yf_data(raw, universe)
+        if df.empty:
+            st.error("No usable data after flattening.")
+            return
+
+        with st.spinner("Filtering universe..."):
+            # Simple filter by price/volume using latest data
+            df = df.sort_values(["Ticker", "Date"])
+            latest = df.groupby("Ticker").tail(1)
+            price_mask = (latest["Close"] >= MIN_PRICE) & (latest["Close"] <= MAX_PRICE)
+            keep_tickers = latest[price_mask]["Ticker"].unique()
+            df = df[df["Ticker"].isin(keep_tickers)].copy()
+
+        with st.spinner("Computing indicators..."):
+            df_ind = compute_indicators(df)
+
+        with st.spinner("Generating signals..."):
+            signals = generate_signals(df_ind)
+
+        st.subheader("Top Buy-Low / Sell-High Candidates (Today)")
+        if signals.empty:
+            st.info("No setups found today with current rules.")
+        else:
+            show_cols = [
+                "Ticker", "Date", "Close", "SMA20", "SMA50", "SMA200",
+                "EMA20", "RSI14", "ATR_PCT", "Volume", "Vol20", "Score"
+            ]
+            st.dataframe(
+                signals[show_cols].sort_values("Score", ascending=False).reset_index(drop=True),
+                use_container_width=True
             )
 
-            if valid:
-                results.append({
-                    "Ticker": ticker,
-                    "RSI": round(rsi,1),
-                    "ADX": round(adx,1),
-                    "BB Pos": round(bb_pos,2),
-                    "VWAP Drift %": round(vwap_drift*100,2)
-                })
+            # Chart viewer
+            st.subheader("Chart View")
+            selected = st.selectbox("Select ticker to view chart", signals["Ticker"].unique())
+            if selected:
+                g = df_ind[df_ind["Ticker"] == selected].sort_values("Date").copy()
+                g["ATR_PCT"] = g["ATR_PCT"] * 100
 
-            progress.progress((i+1)/len(tickers))
+                c1, c2 = st.columns(2)
 
-        if results:
-            df_results = pd.DataFrame(results)
-            st.session_state["scan"] = df_results
+                with c1:
+                    st.markdown(f"**Price & Moving Averages — {selected}**")
+                    price_df = g[["Date", "Close", "SMA20", "SMA50", "SMA200"]].set_index("Date")
+                    st.line_chart(price_df)
 
-            st.success(f"Found {len(df_results)} A+ setups")
-            st.dataframe(df_results)
+                with c2:
+                    st.markdown("**RSI(14) & ATR%**")
+                    rsi_df = g[["Date", "RSI14"]].set_index("Date")
+                    st.line_chart(rsi_df)
+                    atr_df = g[["Date", "ATR_PCT"]].set_index("Date")
+                    st.line_chart(atr_df)
 
-            # SELECT TICKER
-            selected = st.selectbox("Select Ticker", df_results["Ticker"])
+    else:
+        st.info("Set your options in the sidebar and click **Run Scan** to start.")
 
-            if st.button("Analyze Selected"):
-                st.session_state["selected"] = selected
 
-        else:
-            st.warning("No A+ setups found")
-
-# ================= ANALYZER =================
-with tab2:
-
-    symbol = st.text_input(
-        "Ticker",
-        value=st.session_state.get("selected", "SPY")
-    )
-
-    if st.button("Analyze"):
-
-        df = get_data(symbol)
-
-        if df is None:
-            st.error("No data")
-        else:
-            df = add_indicators(df)
-            last = df.iloc[-1]
-
-            price = safe_float(last["Close"])
-            rsi = safe_float(last["RSI"])
-            adx = safe_float(last["ADX"])
-            vwap = safe_float(last["VWAP"])
-
-            bb_low = last["BB_Low"]
-            bb_high = last["BB_High"]
-
-            bb_range = bb_high - bb_low
-            bb_position = (price - bb_low) / bb_range if bb_range != 0 else 0.5
-
-            vwap_drift = abs(price - vwap) / price
-
-            # DISPLAY
-            st.subheader(f"{symbol} — {price:.2f}")
-
-            st.write(f"RSI: {rsi:.1f}")
-            st.write(f"ADX: {adx:.1f}")
-            st.write(f"BB Position: {bb_position:.2f}")
-            st.write(f"VWAP Drift: {vwap_drift*100:.2f}%")
-
-            # EXIT
-            exit_signal = exit_engine(rsi, adx, bb_position, vwap_drift)
-            confidence = exit_confidence(rsi, adx, bb_position, vwap_drift)
-
-            st.subheader("🚦 Exit Decision")
-            st.warning(exit_signal)
-            st.write(f"Confidence: {confidence}/9")
-
-            # ---------------- TRADE TRACKER ----------------
-            st.subheader("📒 Track Trade")
-
-            if "trades" not in st.session_state:
-                st.session_state["trades"] = []
-
-            entry = st.number_input("Entry Price", value=3.0)
-            current = st.number_input("Current Price", value=3.2)
-
-            if st.button("Add Trade"):
-                st.session_state["trades"].append({
-                    "Ticker": symbol,
-                    "Entry": entry,
-                    "Current": current
-                })
-                st.success("Trade added")
-
-            # SHOW TRADES
-            st.subheader("📊 Active Trades")
-
-            for trade in st.session_state["trades"]:
-
-                pnl = ((trade["Current"] - trade["Entry"]) / trade["Entry"]) * 100
-
-                st.write(f"{trade['Ticker']} → P&L: {pnl:.2f}%")
-
-            # ---------------- CHART ----------------
-            fig, ax = plt.subplots()
-            ax.plot(df["Close"], label="Price")
-            ax.plot(df["BB_High"], linestyle="--", label="BB High")
-            ax.plot(df["BB_Low"], linestyle="--", label="BB Low")
-            ax.plot(df["VWAP"], linestyle=":", label="VWAP")
-
-            ax.set_title(symbol)
-            ax.legend()
-
-            st.pyplot(fig)
-            plt.close(fig)
+if __name__ == "__main__":
+    main()
