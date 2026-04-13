@@ -1,8 +1,7 @@
 # app.py
 # -----------------------------------------
-# Simple EOD swing-trade scanner:
-# - U.S. stocks
-# - Long-only
+# EOD Swing-Trade Scanner (Long Only)
+# - U.S. stocks (S&P 500 + Russell 1000)
 # - Uptrend + pullback + momentum turn
 # - Ranks best "buy low, sell high" setups
 # -----------------------------------------
@@ -18,18 +17,38 @@ import yfinance as yf
 
 # ------------- CONFIG --------------------
 
-# TODO: Replace this with your full universe:
-# e.g., S&P 500 + mid-caps + Russell 1000 tickers from a file or API.
-UNIVERSE_TICKERS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM", "UNH", "XOM",
-    "HD", "PG", "V", "MA", "AVGO", "LLY", "PEP", "COST", "ABBV", "MRK"
-]
-
 START_DAYS_BACK = 250  # ~1 year of data
 MIN_PRICE = 10
 MAX_PRICE = 200
-MIN_AVG_VOLUME = 1_000_000
-MIN_MARKET_CAP = 2_000_000_000  # 2B
+MIN_AVG_VOLUME = 1_000_000  # 1M shares
+
+
+# ------------- UNIVERSE LOADING --------------------
+
+@st.cache_data(show_spinner=True)
+def load_universe():
+    # S&P 500 symbols
+    sp500 = pd.read_csv(
+        "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents_symbols.csv"
+    )
+    sp500_symbols = sp500["Symbol"].dropna().tolist()
+
+    # Russell 1000 symbols
+    russell1000 = pd.read_csv(
+        "https://raw.githubusercontent.com/datasets/russell-1000/master/data/russell1000.csv"
+    )
+    russell_symbols = russell1000["Ticker"].dropna().tolist()
+
+    tickers = pd.Series(sp500_symbols + russell_symbols).dropna().unique().tolist()
+
+    # Clean for yfinance (BRK.B -> BRK-B, etc.)
+    cleaned = []
+    for t in tickers:
+        t = str(t).strip().upper()
+        t = t.replace(".", "-")
+        cleaned.append(t)
+
+    return sorted(list(set(cleaned)))
 
 
 # ------------- INDICATOR HELPERS --------------------
@@ -63,68 +82,46 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 # ------------- DATA LOADING --------------------
 
 @st.cache_data(show_spinner=True)
-def load_data(tickers, start, end):
-    data = yf.download(
-        tickers=tickers,
-        start=start,
-        end=end,
-        auto_adjust=False,
-        progress=False,
-        group_by="ticker"
-    )
-    return data
-
-
-def flatten_yf_data(raw, tickers):
+def load_data_long_form(tickers, start, end, batch_size=200):
     """
-    yfinance returns a multi-index DataFrame when multiple tickers are used.
-    This flattens it into a long DataFrame with columns:
+    Downloads OHLCV for many tickers in batches and returns a long-form DataFrame:
     ['Ticker', 'Date', 'Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
     """
-    records = []
-    for t in tickers:
-        if t not in raw.columns.levels[0]:
-            continue
-        df_t = raw[t].copy()
-        df_t["Ticker"] = t
-        df_t = df_t.reset_index().rename(columns={"Date": "Date"})
-        records.append(df_t)
-    if not records:
+    all_records = []
+
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i:i + batch_size]
+        raw = yf.download(
+            tickers=batch,
+            start=start,
+            end=end,
+            auto_adjust=False,
+            progress=False,
+            group_by="ticker"
+        )
+
+        # If only one ticker, yfinance returns a single-level DF
+        if isinstance(raw.columns, pd.MultiIndex):
+            for t in batch:
+                if t not in raw.columns.levels[0]:
+                    continue
+                df_t = raw[t].copy()
+                df_t["Ticker"] = t
+                df_t = df_t.reset_index().rename(columns={"Date": "Date"})
+                all_records.append(df_t)
+        else:
+            # Single ticker case
+            t = batch[0]
+            df_t = raw.copy()
+            df_t["Ticker"] = t
+            df_t = df_t.reset_index().rename(columns={"Date": "Date"})
+            all_records.append(df_t)
+
+    if not all_records:
         return pd.DataFrame()
-    out = pd.concat(records, ignore_index=True)
+
+    out = pd.concat(all_records, ignore_index=True)
     return out
-
-
-# ------------- UNIVERSE FILTERS --------------------
-
-def filter_universe(df: pd.DataFrame) -> pd.DataFrame:
-    # Use last row per ticker to filter by price, volume, etc.
-    latest = df.sort_values("Date").groupby("Ticker").tail(1)
-
-    # Price filter
-    price_mask = (latest["Close"] >= MIN_PRICE) & (latest["Close"] <= MAX_PRICE)
-
-    # Volume filter (20d avg)
-    vol_20 = (
-        df.sort_values("Date")
-        .groupby("Ticker")["Volume"]
-        .rolling(20)
-        .mean()
-        .reset_index()
-        .rename(columns={"Volume": "Vol20"})
-    )
-    df = df.merge(vol_20, on=["Ticker", "level_1"], how="left") if "level_1" in vol_20.columns else df
-
-    # Recompute latest with Vol20 if needed
-    latest = df.sort_values("Date").groupby("Ticker").tail(1)
-    vol_mask = latest["Volume"].rolling(20).mean() >= MIN_AVG_VOLUME if "Vol20" not in latest.columns else latest["Vol20"] >= MIN_AVG_VOLUME
-
-    # Market cap filter (approx via yfinance info)
-    # For simplicity, we skip strict market cap filtering here.
-    # You can pre-filter your universe externally by market cap.
-
-    keep_tickers = latest[price_mask & vol_mask]["Ticker"].unique()
-    return df[df["Ticker"].isin(keep_tickers)].copy()
 
 
 # ------------- INDICATOR ENGINE --------------------
@@ -144,6 +141,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
         g["ATR_PCT"] = g["ATR14"] / g["Close"]
         g["Vol20"] = g["Volume"].rolling(20).mean()
         out_frames.append(g)
+
     out = pd.concat(out_frames, ignore_index=True)
     return out
 
@@ -152,11 +150,11 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def evaluate_row(row, prev_rows):
     """
-    Apply your long-only, incline + pullback + momentum rules
+    Apply long-only, incline + pullback + momentum rules
     to the latest row for a ticker.
     """
-    # Require enough history
-    if any(math.isnan(row.get(col, np.nan)) for col in ["SMA20", "SMA50", "SMA200", "RSI14", "ATR14", "Vol20"]):
+    needed = ["SMA20", "SMA50", "SMA200", "EMA20", "RSI14", "ATR14", "Vol20"]
+    if any(math.isnan(row.get(col, np.nan)) for col in needed):
         return 0.0, False
 
     close = row["Close"]
@@ -169,14 +167,13 @@ def evaluate_row(row, prev_rows):
     vol = row["Volume"]
     vol20 = row["Vol20"]
 
-    # Trend filter: incline
+    # Trend filter: stock on the incline
     trend_ok = (close > sma20) and (sma20 > sma50) and (sma50 > sma200)
 
     # Pullback: touched EMA20/SMA20 in last 3–5 days
     recent = prev_rows.tail(5).copy()
     pullback_ok = False
     if not recent.empty:
-        # price dipped to or below EMA20/SMA20
         cond = (recent["Low"] <= recent["EMA20"]) | (recent["Low"] <= recent["SMA20"])
         pullback_ok = cond.any()
 
@@ -195,7 +192,6 @@ def evaluate_row(row, prev_rows):
     # ATR sanity: between 1% and 5%
     atr_ok = (atr_pct is not None) and (0.01 <= atr_pct <= 0.05)
 
-    # Final "is setup" flag
     is_setup = trend_ok and pullback_ok and momentum_ok and vol_ok and atr_ok
 
     # Scoring
@@ -212,6 +208,7 @@ def evaluate_row(row, prev_rows):
 def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["Ticker", "Date"]).copy()
     latest_rows = []
+
     for t, g in df.groupby("Ticker"):
         g = g.copy()
         if len(g) < 60:
@@ -223,8 +220,10 @@ def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
         last["Score"] = score
         last["IsSetup"] = is_setup
         latest_rows.append(last)
+
     if not latest_rows:
         return pd.DataFrame()
+
     out = pd.DataFrame(latest_rows)
     out = out[out["IsSetup"]].sort_values("Score", ascending=False)
     return out
@@ -237,39 +236,63 @@ def main():
     st.title("📈 EOD Swing Scanner (Long Only, Buy Low / Sell High)")
 
     st.markdown(
-        "Scans U.S. stocks for **uptrends with pullbacks and momentum turning up**. "
-        "Educational use only — not financial advice."
+        "Scans U.S. stocks (S&P 500 + Russell 1000) for **uptrends with pullbacks and momentum turning up**.\n\n"
+        "**Educational use only — not financial advice.**"
     )
 
-    # Sidebar controls
+    with st.spinner("Loading universe..."):
+        universe_all = load_universe()
+
     st.sidebar.header("Settings")
-    max_tickers = st.sidebar.slider("Max tickers to scan", 10, len(UNIVERSE_TICKERS), len(UNIVERSE_TICKERS), step=10)
-    universe = UNIVERSE_TICKERS[:max_tickers]
+    max_tickers = st.sidebar.slider(
+        "Max tickers to scan",
+        min_value=100,
+        max_value=len(universe_all),
+        value=min(1000, len(universe_all)),
+        step=50,
+    )
+    universe = universe_all[:max_tickers]
 
     lookback_days = st.sidebar.slider("Lookback days", 120, 365, START_DAYS_BACK, step=10)
     start_date = dt.date.today() - dt.timedelta(days=lookback_days)
     end_date = dt.date.today()
 
-    st.sidebar.write(f"Scanning {len(universe)} tickers from {start_date} to {end_date}")
+    st.sidebar.write(f"Scanning **{len(universe)}** tickers from {start_date} to {end_date}")
 
     if st.sidebar.button("Run Scan"):
-        with st.spinner("Downloading data..."):
-            raw = load_data(universe, start_date, end_date)
-            if raw.empty:
+        with st.spinner("Downloading data in batches..."):
+            df = load_data_long_form(universe, start_date, end_date, batch_size=200)
+            if df.empty:
                 st.error("No data returned. Check tickers or date range.")
                 return
 
-        df = flatten_yf_data(raw, universe)
-        if df.empty:
-            st.error("No usable data after flattening.")
-            return
-
-        with st.spinner("Filtering universe..."):
-            # Simple filter by price/volume using latest data
+        # Basic price + volume filter using latest data
+        with st.spinner("Filtering universe by price and volume..."):
             df = df.sort_values(["Ticker", "Date"])
             latest = df.groupby("Ticker").tail(1)
+
             price_mask = (latest["Close"] >= MIN_PRICE) & (latest["Close"] <= MAX_PRICE)
-            keep_tickers = latest[price_mask]["Ticker"].unique()
+
+            # 20d average volume
+            vol20 = (
+                df.groupby("Ticker")["Volume"]
+                .rolling(20)
+                .mean()
+                .reset_index()
+                .rename(columns={"Volume": "Vol20"})
+            )
+            df = df.reset_index(drop=True)
+            df = df.merge(vol20, on=["Ticker", "level_1"], how="left") if "level_1" in vol20.columns else df
+
+            # Recompute latest with Vol20 if merged
+            latest = df.sort_values(["Ticker", "Date"]).groupby("Ticker").tail(1)
+            if "Vol20" in latest.columns:
+                vol_mask = latest["Vol20"] >= MIN_AVG_VOLUME
+            else:
+                # Fallback: use raw volume
+                vol_mask = latest["Volume"].rolling(20).mean() >= MIN_AVG_VOLUME
+
+            keep_tickers = latest[price_mask & vol_mask]["Ticker"].unique()
             df = df[df["Ticker"].isin(keep_tickers)].copy()
 
         with st.spinner("Computing indicators..."):
@@ -291,7 +314,6 @@ def main():
                 use_container_width=True
             )
 
-            # Chart viewer
             st.subheader("Chart View")
             selected = st.selectbox("Select ticker to view chart", signals["Ticker"].unique())
             if selected:
@@ -311,7 +333,6 @@ def main():
                     st.line_chart(rsi_df)
                     atr_df = g[["Date", "ATR_PCT"]].set_index("Date")
                     st.line_chart(atr_df)
-
     else:
         st.info("Set your options in the sidebar and click **Run Scan** to start.")
 
