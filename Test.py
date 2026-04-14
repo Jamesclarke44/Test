@@ -151,7 +151,7 @@ def download_intraday_batches(tickers, interval="1m", period="1d"):
 def get_active_stocks():
     try:
         data = yf.download(
-            tickers=TICKERS[:1500],  # scan more here
+            tickers=TICKERS[:3000],  # scan more here
             period="2d",
             interval="1d",
             group_by="ticker",
