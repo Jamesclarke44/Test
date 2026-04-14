@@ -204,7 +204,7 @@ def run_momentum_scanner(interval="1m"):
     settings = st.session_state.settings
 
     # Float filter
-    float_pass = TICKERS[:500]
+    float_pass = random.sample(TICKERS, 500)
     if not float_pass:
         return pd.DataFrame()
 
