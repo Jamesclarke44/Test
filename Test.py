@@ -133,12 +133,12 @@ def download_intraday_batches(tickers, interval="1m", period="1d"):
         else:
             # Single ticker case
             else:
-    df_t = data.copy()
-    df_t = df_t[df_t["Close"].notna()]
+                df_t = data.copy()
+                df_t = df_t[df_t["Close"].notna()]
 
-    if not df_t.empty and len(tickers) == 1:
-        df_t.index = df_t.index.tz_localize(None)
-        result[tickers[0]] = df_t
+                if not df_t.empty and len(tickers) == 1:
+                    df_t.index = df_t.index.tz_localize(None)
+                    result[tickers[0]] = df_t
         return result
     except Exception:
         return {}
