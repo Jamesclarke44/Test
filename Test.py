@@ -272,7 +272,8 @@ def run_momentum_scanner(interval="1m"):
         avg20_volume = d["Volume"].iloc[-21:-1].mean()
         rvol = compute_rvol(today_volume, avg20_volume)
 
-        if rvol < settings["min_rvol"]:
+        # TEMP: loosen RVOL massively
+        if rvol < 1.0:
             continue
 
         # Intraday slice
