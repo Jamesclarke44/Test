@@ -239,14 +239,14 @@ def run_momentum_scanner(interval="1m"):
     # Float filter
     active = get_active_stocks()
 
-if not active:
-    st.warning("No active stocks found")
-    return pd.DataFrame()
-
-# Scan ONLY movers
-float_pass = active[:300]
-    if not float_pass:
+    if not active:
+        st.warning("No active stocks found")
         return pd.DataFrame()
+
+    # Scan ONLY movers
+    float_pass = active[:300]
+        if not float_pass:
+            return pd.DataFrame()
 
     # DAILY DATA (PATCHED)
     daily = download_daily_data(float_pass, period="1mo")
