@@ -117,16 +117,28 @@ def download_intraday_batches(tickers, interval="1m", period="1d"):
         if isinstance(data.columns, pd.MultiIndex):
             for t in tickers:
                 if t in data.columns.get_level_values(0):
+                    df_t = data[t].copy()
+
+        # Only require Close to exist (keep most data)
+        df_t = df_t[df_t["Close"].notna()]
+
+        if df_t.empty:
+            continue
+
+        df_t.index = df_t.index.tz_localize(None)
+        result[t] = df_t
                     df_t = data[t].dropna()
                     df_t.index = df_t.index.tz_localize(None)
                     result[t] = df_t
         else:
             # Single ticker case
-            df_t = data[t].copy()
-            df_t = df_t[df_t["Close"].notna()]
-            df.index = df.index.tz_localize(None)
-            if len(tickers) == 1:
-                result[tickers[0]] = df
+            else:
+    df_t = data.copy()
+    df_t = df_t[df_t["Close"].notna()]
+
+    if not df_t.empty and len(tickers) == 1:
+        df_t.index = df_t.index.tz_localize(None)
+        result[tickers[0]] = df_t
         return result
     except Exception:
         return {}
