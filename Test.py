@@ -99,7 +99,6 @@ def compute_rvol(today_volume, avg20_volume):
     return today_volume / avg20_volume
 
 # ---------- Intraday batch loader ----------
-
 @st.cache_data
 def download_intraday_batches(tickers, interval="1m", period="1d"):
     try:
@@ -112,36 +111,40 @@ def download_intraday_batches(tickers, interval="1m", period="1d"):
             threads=True,
             progress=False
         )
-        # Normalize to dict[ticker] -> df
+
         result = {}
+
+        # MULTI-TICKER CASE
         if isinstance(data.columns, pd.MultiIndex):
             for t in tickers:
                 if t in data.columns.get_level_values(0):
+
                     df_t = data[t].copy()
 
-        # Only require Close to exist (keep most data)
-        df_t = df_t[df_t["Close"].notna()]
+                    # Only require Close (DON'T drop everything)
+                    df_t = df_t[df_t["Close"].notna()]
 
-        if df_t.empty:
-            continue
+                    if df_t.empty:
+                        continue
 
-        df_t.index = df_t.index.tz_localize(None)
-        result[t] = df_t
-                    df_t = data[t].dropna()
                     df_t.index = df_t.index.tz_localize(None)
                     result[t] = df_t
-        else:
-            # Single ticker case
-            else:
-                df_t = data.copy()
-                df_t = df_t[df_t["Close"].notna()]
 
-                if not df_t.empty and len(tickers) == 1:
-                    df_t.index = df_t.index.tz_localize(None)
-                    result[tickers[0]] = df_t
+        # SINGLE TICKER CASE
+        else:
+            df_t = data.copy()
+            df_t = df_t[df_t["Close"].notna()]
+
+            if not df_t.empty and len(tickers) == 1:
+                df_t.index = df_t.index.tz_localize(None)
+                result[tickers[0]] = df_t
+
         return result
-    except Exception:
+
+    except Exception as e:
+        st.write("Intraday download error:", e)
         return {}
+        
 # ============================================================
 # PART 4 — SCANNERS & ENGINES (PATCHED)
 # ============================================================
