@@ -245,8 +245,8 @@ def run_momentum_scanner(interval="1m"):
 
     # Scan ONLY movers
     float_pass = active[:300]
-        if not float_pass:
-            return pd.DataFrame()
+    if not float_pass:
+        return pd.DataFrame()
 
     # DAILY DATA (PATCHED)
     daily = download_daily_data(float_pass, period="1mo")
