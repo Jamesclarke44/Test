@@ -148,7 +148,40 @@ def download_intraday_batches(tickers, interval="1m", period="1d"):
 # ============================================================
 # PART 4 — SCANNERS & ENGINES (PATCHED)
 # ============================================================
+def get_active_stocks():
+    try:
+        data = yf.download(
+            tickers=TICKERS[:1500],  # scan more here
+            period="2d",
+            interval="1d",
+            group_by="ticker",
+            progress=False
+        )
 
+        movers = []
+
+        for t in TICKERS[:1500]:
+            try:
+                d = data[t]
+                if d is None or d.empty or len(d) < 2:
+                    continue
+
+                prev_close = d["Close"].iloc[-2]
+                last_close = d["Close"].iloc[-1]
+                change_pct = (last_close - prev_close) / prev_close * 100
+                volume = d["Volume"].iloc[-1]
+
+                # 🔥 KEY: loosen criteria
+                if change_pct > 2 and volume > 500000:
+                    movers.append(t)
+
+            except:
+                continue
+
+        return movers
+
+    except:
+        return []
 # ---------- Trend Engine (EMA9, EMA20, VWAP) ----------
 
 def ema(series, length):
@@ -204,7 +237,14 @@ def run_momentum_scanner(interval="1m"):
     settings = st.session_state.settings
 
     # Float filter
-    float_pass = random.sample(TICKERS, 500)
+    active = get_active_stocks()
+
+if not active:
+    st.warning("No active stocks found")
+    return pd.DataFrame()
+
+# Scan ONLY movers
+float_pass = active[:300]
     if not float_pass:
         return pd.DataFrame()
 
