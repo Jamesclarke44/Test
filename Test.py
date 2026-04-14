@@ -234,9 +234,12 @@ def run_momentum_scanner(interval="1m"):
 
         if not df["TrendStrong"].iloc[-1]:
             continue
+        hod = df["High"].max()
+        price = df["Close"].iloc[-1]
 
-        if not is_new_hod(df):
-            continue
+        # Allow near breakout instead of exact HOD
+        if price < hod * 0.97:
+        continue
 
         score = compute_momentum_score(df)
 
