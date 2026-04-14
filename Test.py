@@ -36,7 +36,7 @@ def init_settings():
         st.session_state.settings = {
             "min_price": 2.0,
             "max_price": 20.0,
-            "min_rvol": 1.5,
+            "min_rvol": 1.2,
             "max_float_millions": 50.0,
             "gap_min_pct": 5.0,
             "require_catalyst": False,  # placeholder
