@@ -239,7 +239,7 @@ def run_momentum_scanner(interval="1m"):
 
         # Allow near breakout instead of exact HOD
         if price < hod * 0.97:
-        continue
+            continue
 
         score = compute_momentum_score(df)
 
