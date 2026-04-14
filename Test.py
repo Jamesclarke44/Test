@@ -122,7 +122,8 @@ def download_intraday_batches(tickers, interval="1m", period="1d"):
                     result[t] = df_t
         else:
             # Single ticker case
-            df = data.dropna()
+            df_t = data[t].copy()
+            df_t = df_t[df_t["Close"].notna()]
             df.index = df.index.tz_localize(None)
             if len(tickers) == 1:
                 result[tickers[0]] = df
