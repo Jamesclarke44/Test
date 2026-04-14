@@ -36,7 +36,7 @@ def init_settings():
         st.session_state.settings = {
             "min_price": 2.0,
             "max_price": 20.0,
-            "min_rvol": 3.0,
+            "min_rvol": 1.5,
             "max_float_millions": 50.0,
             "gap_min_pct": 5.0,
             "require_catalyst": False,  # placeholder
@@ -188,10 +188,7 @@ def run_momentum_scanner(interval="1m"):
     settings = st.session_state.settings
 
     # Float filter
-    float_pass = [
-        t for t in TICKERS
-        if passes_float_filter(t, settings["max_float_millions"])
-    ]
+    float_pass = TICKERS[:500]
     if not float_pass:
         return pd.DataFrame()
 
