@@ -447,7 +447,7 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Run Momentum 1m"):
-                df = run_momentum_1m()
+                df = run_pro_scanner("1m")
                 render_summary(df, "Momentum 1m")
                 render_results_table(df, "Momentum 1m Results")
         with col2:
