@@ -231,7 +231,52 @@ def is_new_hod(df):
     return df["High"].iloc[-1] >= df["High"].max()
 
 # ---------- Core Momentum Scanner (PATCHED) ----------
+
 def run_pro_scanner(interval="1m"):
+    def run_pro_scanner(interval="1m"):
+    ...
+    return df_out
+
+# ✅ ADD IT RIGHT HERE 👇
+def run_gap_scanner():
+    st.write("⚡ Running Gap Scanner…")
+    settings = st.session_state.settings
+
+    daily = download_daily_data(TICKERS, period="5d")
+    if daily is None:
+        return pd.DataFrame()
+
+    results = []
+
+    for ticker in TICKERS:
+        try:
+            d = daily[ticker]
+        except:
+            continue
+
+        if d is None or d.empty or len(d) < 2:
+            continue
+
+        prev_close = d["Close"].iloc[-2]
+        last_close = d["Close"].iloc[-1]
+
+        gap_pct = (last_close - prev_close) / prev_close * 100
+
+        # 🔥 loosened filter
+        if gap_pct < 2:
+            continue
+
+        results.append({
+            "Ticker": ticker,
+            "Price": round(last_close, 2),
+            "Gap %": round(gap_pct, 2),
+        })
+
+    if not results:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(results)
+    return df.sort_values("Gap %", ascending=False)
     st.write(f"🚀 Running PRO Scanner ({interval})…")
     settings = st.session_state.settings
 
