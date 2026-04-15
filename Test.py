@@ -279,7 +279,10 @@ def run_pro_scanner(interval="1m"):
             "Ticker": ticker,
             "Price": round(price, 2),
             "RVOL": round(rvol, 2),
-            "Score": score
+            "Score": score,
+            "Trend": "Yes" if ema_trend else "No",
+            "VWAP Hold": "Yes" if above_vwap else "No",
+            "Near HOD": "Yes" if near_hod else "No"
         })
 
         if not results:
