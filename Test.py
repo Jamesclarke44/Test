@@ -405,11 +405,16 @@ def run_pullback_scanner(interval="1m"):
 
     if not results:
         return pd.DataFrame()
+        
+    return pd.DataFrame(results)
 
-    df_out = pd.DataFrame(results)
-    df_out.reset_index(drop=True, inplace=True)
 
-    return df_out
+def run_pullback_1m():
+    return run_pullback_scanner("1m")
+
+def run_pullback_5m():
+    return run_pullback_scanner("5m")
+        
 # ============================================================
 # PART 5 — UI HELPERS
 # ============================================================
