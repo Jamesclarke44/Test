@@ -198,19 +198,6 @@ def compute_trend_metrics(df):
     if df is None or df.empty:
         return None
         
-# ---------- INDICATORS ----------
-
-def ema(series, length):
-    ...
-
-def vwap(df):
-    ...
-
-def compute_trend_metrics(df):
-    ...
-
-
-# 🔥 ADD THIS RIGHT HERE
 def calculate_trade_levels(df, setup_type="momentum"):
     if df is None or df.empty or len(df) < 5:
         return None, None, None
