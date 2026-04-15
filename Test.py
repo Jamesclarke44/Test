@@ -202,7 +202,6 @@ def compute_trend_metrics(df):
     df["EMA9"] = ema(df["Close"], 9)
     df["EMA20"] = ema(df["Close"], 20)
     df["VWAP"] = vwap(df)
-
     return df
 
 
