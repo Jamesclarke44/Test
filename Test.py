@@ -237,7 +237,6 @@ def run_pro_scanner(interval="1m"):
     ...
     return df_out
 
-# ✅ ADD IT RIGHT HERE 👇
 def run_gap_scanner():
     st.write("⚡ Running Gap Scanner…")
     settings = st.session_state.settings
