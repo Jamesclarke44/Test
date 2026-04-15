@@ -232,7 +232,47 @@ def calculate_trade_levels(df, setup_type="momentum"):
 
     return round(entry, 2), round(stop, 2), round(target, 2)
 
+# ---------- SIGNAL ENGINE ----------
+def generate_signals(df, setup_type="momentum"):
+    if df is None or df.empty or len(df) < 5:
+        return "WAIT"
 
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    if setup_type == "momentum":
+        breakout = last["Close"] > prev["High"]
+        volume_confirm = last["Volume"] > df["Volume"].rolling(5).mean().iloc[-1]
+
+        if breakout and volume_confirm:
+            return "BUY"
+
+    elif setup_type == "pullback":
+        bounce = (
+            prev["Close"] <= prev["EMA9"] and
+            last["Close"] > last["EMA9"]
+        )
+
+        if bounce:
+            return "BUY"
+
+    return "WAIT"
+
+
+# ---------- EXIT ENGINE ----------
+def check_exit(df, entry, stop, target):
+    if df is None or df.empty:
+        return "HOLD"
+
+    last_price = df["Close"].iloc[-1]
+
+    if stop is not None and last_price <= stop:
+        return "STOP HIT ❌"
+
+    if target is not None and last_price >= target:
+        return "TARGET HIT 🎯"
+
+    return "HOLD"
 # ---------- PRO SCANNER ----------
 
 def run_pro_scanner(interval="1m"):
