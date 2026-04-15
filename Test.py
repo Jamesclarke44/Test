@@ -336,7 +336,14 @@ def run_gap_scanner():
 def run_pullback_scanner(interval="1m"):
     st.write(f"⚡ Running Pullback Scanner ({interval})…")
 
-    intraday = download_intraday_batches(TICKERS, interval=interval, period="1d")
+    # 🔥 ONLY scan active stocks (huge improvement)
+    active = get_active_stocks()
+
+    if not active:
+        return pd.DataFrame()
+
+    intraday = download_intraday_batches(active[:300], interval=interval, period="1d")
+
     results = []
 
     for ticker, df in intraday.items():
@@ -350,17 +357,27 @@ def run_pullback_scanner(interval="1m"):
 
         last = df.iloc[-1]
 
-        if (
-            last["EMA9"] > last["EMA20"] and
-            last["Close"] >= last["EMA9"] * 0.97 and
-            last["Close"] <= last["EMA9"] * 1.03
-        ):
+        trend = last["EMA9"] > last["EMA20"]
+
+        # 🔥 tighter pullback zone
+        pullback_zone = (
+            last["EMA9"] * 0.98 <= last["Close"] <= last["EMA9"] * 1.02
+        )
+
+        if trend and pullback_zone:
             results.append({
                 "Ticker": ticker,
-                "Price": round(last["Close"], 2)
+                "Price": round(last["Close"], 2),
+                "EMA9": round(last["EMA9"], 2)
             })
 
-    return pd.DataFrame(results)
+    if not results:
+        return pd.DataFrame()
+
+    df_out = pd.DataFrame(results)
+    df_out.reset_index(drop=True, inplace=True)
+
+    return df_out
 
 
 def run_pullback_1m():
