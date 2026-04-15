@@ -183,7 +183,6 @@ def get_active_stocks():
     except:
         return []
 
-
 # ---------- INDICATORS ----------
 
 def ema(series, length):
@@ -203,7 +202,6 @@ def compute_trend_metrics(df):
     df["EMA20"] = ema(df["Close"], 20)
     df["VWAP"] = vwap(df)
     return df
-
 
 # ---------- ENTRY / EXIT ----------
 
@@ -257,7 +255,6 @@ def generate_signals(df, setup_type="momentum"):
             return "BUY"
 
     return "WAIT"
-
 
 # ---------- EXIT ENGINE ----------
 def check_exit(df, entry, stop, target):
@@ -363,7 +360,6 @@ def run_pro_scanner(interval="1m"):
 
     return df_out
 
-
 # ---------- GAP SCANNER ----------
 
 def run_gap_scanner():
@@ -398,7 +394,6 @@ def run_gap_scanner():
         })
 
     return pd.DataFrame(results)
-
 
 # ---------- PULLBACK SCANNER ----------
 
@@ -447,7 +442,6 @@ def run_pullback_scanner(interval="1m"):
         return pd.DataFrame()
         
     return pd.DataFrame(results)
-
 
 def run_pullback_1m():
     return run_pullback_scanner("1m")
