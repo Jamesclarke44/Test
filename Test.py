@@ -395,9 +395,6 @@ def run_pullback_scanner(interval="1m"):
 
             entry, stop, target = calculate_trade_levels(df, "pullback")
 
-            if entry is None:
-                continue
-
             results.append({
                 "Ticker": ticker,
                 "Price": round(last["Close"], 2),
