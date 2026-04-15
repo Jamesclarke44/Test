@@ -197,6 +197,50 @@ def vwap(df):
 def compute_trend_metrics(df):
     if df is None or df.empty:
         return None
+        
+# ---------- INDICATORS ----------
+
+def ema(series, length):
+    ...
+
+def vwap(df):
+    ...
+
+def compute_trend_metrics(df):
+    ...
+
+
+# 🔥 ADD THIS RIGHT HERE
+def calculate_trade_levels(df, setup_type="momentum"):
+    if df is None or df.empty or len(df) < 5:
+        return None, None, None
+
+    last = df.iloc[-1]
+
+    # ---------- MOMENTUM ----------
+    if setup_type == "momentum":
+        entry = df["High"].iloc[-2]
+        stop = df["Low"].iloc[-2]
+
+    # ---------- PULLBACK ----------
+    elif setup_type == "pullback":
+        entry = last["EMA9"]
+        stop = df["Low"].rolling(5).min().iloc[-1]
+
+    else:
+        return None, None, None
+
+    risk = entry - stop
+    if risk <= 0:
+        return None, None, None
+
+    target = entry + (risk * 2)
+
+    return round(entry, 2), round(stop, 2), round(target, 2)
+
+
+# ---------- PRO SCANNER ----------
+def run_pro_scanner(interval="1m"):
 
     df = df.copy()
     df["EMA9"] = ema(df["Close"], 9)
