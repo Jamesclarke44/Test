@@ -148,10 +148,14 @@ def download_intraday_batches(tickers, interval="1m", period="1d"):
 # ============================================================
 # PART 4 — SCANNERS & ENGINES (PATCHED)
 # ============================================================
+# ============================================================
+# PART 4 — SCANNERS (PRO VERSION — FIXED)
+# ============================================================
+
 def get_active_stocks():
     try:
         data = yf.download(
-            tickers=TICKERS[:3000],  # scan more here
+            tickers=TICKERS[:2000],
             period="2d",
             interval="1d",
             group_by="ticker",
@@ -160,7 +164,7 @@ def get_active_stocks():
 
         movers = []
 
-        for t in TICKERS[:1500]:
+        for t in TICKERS[:2000]:
             try:
                 d = data[t]
                 if d is None or d.empty or len(d) < 2:
@@ -171,8 +175,8 @@ def get_active_stocks():
                 change_pct = (last_close - prev_close) / prev_close * 100
                 volume = d["Volume"].iloc[-1]
 
-                # 🔥 KEY: loosen criteria
-                if change_pct > 2 and volume > 500000:
+                # 🔥 LOOSENED BIG TIME
+                if change_pct > 1 and volume > 300000:
                     movers.append(t)
 
             except:
@@ -182,7 +186,9 @@ def get_active_stocks():
 
     except:
         return []
-# ---------- Trend Engine (EMA9, EMA20, VWAP) ----------
+
+
+# ---------- TREND HELPERS ----------
 
 def ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
@@ -195,47 +201,118 @@ def vwap(df):
 def compute_trend_metrics(df):
     if df is None or df.empty:
         return None
+
     df = df.copy()
     df["EMA9"] = ema(df["Close"], 9)
     df["EMA20"] = ema(df["Close"], 20)
     df["VWAP"] = vwap(df)
-    df["TrendStrong"] = (df["EMA9"] > df["EMA20"]) & (df["Close"] > df["VWAP"])
     return df
 
-# ---------- Momentum Score ----------
 
-def compute_momentum_score(df):
-    if df is None or df.empty:
-        return 0
-    last = df.iloc[-1]
-    score = 0
-    if last["EMA9"] > last["EMA20"]:
-        score += 2
-    if last["Close"] > last["VWAP"]:
-        score += 2
-    if len(df) > 3:
-        if df["High"].iloc[-1] > df["High"].iloc[-2]:
-            score += 1
-        if df["High"].iloc[-2] > df["High"].iloc[-3]:
-            score += 1
-    if len(df) > 5:
-        if df["Volume"].iloc[-1] > df["Volume"].iloc[-2]:
-            score += 1
-    return score
-
-# ---------- New High of Day ----------
-
-def is_new_hod(df):
-    if df is None or df.empty:
-        return False
-    return df["High"].iloc[-1] >= df["High"].max()
-
-# ---------- Core Momentum Scanner (PATCHED) ----------
+# ============================================================
+# 🚀 PRO MOMENTUM SCANNER
+# ============================================================
 
 def run_pro_scanner(interval="1m"):
-    def run_pro_scanner(interval="1m"):
-    ...
+    st.write(f"🚀 Running PRO Scanner ({interval})…")
+    settings = st.session_state.settings
+
+    active = get_active_stocks()
+
+    if not active:
+        st.warning("No active stocks found")
+        return pd.DataFrame()
+
+    st.write(f"Active stocks: {len(active)}")
+
+    daily = download_daily_data(active, period="1mo")
+    intraday = download_intraday_batches(active, interval=interval, period="1d")
+
+    if daily is None or not intraday:
+        return pd.DataFrame()
+
+    results = []
+
+    for ticker in active:
+
+        try:
+            d = daily[ticker]
+            df = intraday.get(ticker)
+        except:
+            continue
+
+        if d is None or df is None or df.empty or len(df) < 20:
+            continue
+
+        # PRICE FILTER
+        price = df["Close"].iloc[-1]
+        if price < settings["min_price"] or price > settings["max_price"]:
+            continue
+
+        # RVOL (LOOSENED)
+        today_vol = d["Volume"].iloc[-1]
+        avg_vol = d["Volume"].iloc[-21:-1].mean() if len(d) > 21 else d["Volume"].mean()
+        rvol = compute_rvol(today_vol, avg_vol)
+
+        if rvol < 0.8:
+            continue
+
+        # INDICATORS
+        df = compute_trend_metrics(df)
+        if df is None:
+            continue
+
+        last = df.iloc[-1]
+
+        ema_trend = last["EMA9"] > last["EMA20"]
+        above_vwap = last["Close"] > last["VWAP"]
+
+        hod = df["High"].max()
+        near_hod = last["Close"] >= hod * 0.96
+
+        micro_pullback = (
+            last["Close"] >= last["EMA9"] * 0.98 and
+            last["Close"] <= last["EMA9"] * 1.03
+        )
+
+        vol_spike = df["Volume"].iloc[-1] > df["Volume"].rolling(10).mean().iloc[-1]
+
+        # SCORE SYSTEM
+        score = 0
+        if ema_trend: score += 2
+        if above_vwap: score += 2
+        if near_hod: score += 2
+        if micro_pullback: score += 2
+        if vol_spike: score += 2
+
+        if score < 4:
+            continue
+
+        results.append({
+            "Ticker": ticker,
+            "Price": round(price, 2),
+            "RVOL": round(rvol, 2),
+            "Score": score,
+            "Trend": ema_trend,
+            "VWAP": above_vwap,
+            "Near HOD": near_hod,
+            "Pullback": micro_pullback,
+            "Vol Spike": vol_spike
+        })
+
+    if not results:
+        return pd.DataFrame()
+
+    df_out = pd.DataFrame(results)
+    df_out = df_out.sort_values("Score", ascending=False)
+    df_out.reset_index(drop=True, inplace=True)
+
     return df_out
+
+
+# ============================================================
+# 📈 GAP SCANNER (FIXED)
+# ============================================================
 
 def run_gap_scanner():
     st.write("⚡ Running Gap Scanner…")
@@ -261,14 +338,14 @@ def run_gap_scanner():
 
         gap_pct = (last_close - prev_close) / prev_close * 100
 
-        # 🔥 loosened filter
+        # 🔥 LOOSENED
         if gap_pct < 2:
             continue
 
         results.append({
             "Ticker": ticker,
             "Price": round(last_close, 2),
-            "Gap %": round(gap_pct, 2),
+            "Gap %": round(gap_pct, 2)
         })
 
     if not results:
@@ -276,187 +353,6 @@ def run_gap_scanner():
 
     df = pd.DataFrame(results)
     return df.sort_values("Gap %", ascending=False)
-    st.write(f"🚀 Running PRO Scanner ({interval})…")
-    settings = st.session_state.settings
-
-    # ---------------------------
-    # STEP 1 — GET ACTIVE STOCKS
-    # ---------------------------
-    active = get_active_stocks()
-
-    if not active:
-        st.warning("No active stocks found")
-        return pd.DataFrame()
-
-    st.write(f"Active stocks: {len(active)}")
-
-    # ---------------------------
-    # STEP 2 — LOAD DATA
-    # ---------------------------
-    daily = download_daily_data(active, period="1mo")
-    intraday = download_intraday_batches(active, interval=interval, period="1d")
-
-    if daily is None or not intraday:
-        return pd.DataFrame()
-
-    st.write(f"Intraday loaded: {len(intraday)}")
-
-    results = []
-
-    # ---------------------------
-    # STEP 3 — LOOP
-    # ---------------------------
-    for ticker in active:
-
-        try:
-            d = daily[ticker]
-            df = intraday.get(ticker)
-        except:
-            continue
-
-        if d is None or df is None or df.empty or len(df) < 20:
-            continue
-
-        # ---------------------------
-        # PRICE FILTER
-        # ---------------------------
-        price = df["Close"].iloc[-1]
-        if price < settings["min_price"] or price > settings["max_price"]:
-            continue
-
-        # ---------------------------
-        # RVOL
-        # ---------------------------
-        today_vol = d["Volume"].iloc[-1]
-        avg_vol = d["Volume"].iloc[-21:-1].mean() if len(d) > 21 else d["Volume"].mean()
-        rvol = compute_rvol(today_vol, avg_vol)
-
-        # 🔥 loosened
-        if rvol < 0.8:
-            continue
-
-        # ---------------------------
-        # INDICATORS
-        # ---------------------------
-        df = compute_trend_metrics(df)
-        if df is None:
-            continue
-
-        last = df.iloc[-1]
-
-        # ---------------------------
-        # CORE SIGNALS
-        # ---------------------------
-        ema_trend = last["EMA9"] > last["EMA20"]
-        above_vwap = last["Close"] > last["VWAP"]
-
-        # HOD breakout
-        hod = df["High"].max()
-        near_hod = last["Close"] >= hod * 0.97
-
-        # MICRO PULLBACK (KEY EDGE)
-        micro_pullback = (
-            last["EMA9"] * 0.995 <= last["Close"] <= last["EMA9"] * 1.02
-        )
-
-        # VOLUME SURGE
-        vol_spike = df["Volume"].iloc[-1] > df["Volume"].rolling(10).mean().iloc[-1]
-
-        # ---------------------------
-        # SCORING SYSTEM (🔥 CORE)
-        # ---------------------------
-        score = 0
-
-        if ema_trend:
-            score += 2
-        if above_vwap:
-            score += 2
-        if near_hod:
-            score += 2
-        if micro_pullback:
-            score += 2
-        if vol_spike:
-            score += 2
-
-        # ---------------------------
-        # FILTER MIN SCORE
-        # ---------------------------
-        if score < 4:
-            continue
-
-        results.append({
-            "Ticker": ticker,
-            "Price": round(price, 2),
-            "RVOL": round(rvol, 2),
-            "Score": score,
-            "Trend": "Yes" if ema_trend else "No",
-            "VWAP Hold": "Yes" if above_vwap else "No",
-            "Near HOD": "Yes" if near_hod else "No",
-            "Pullback": "Yes" if micro_pullback else "No",
-            "Vol Spike": "Yes" if vol_spike else "No",
-        })
-
-    if not results:
-        return pd.DataFrame()
-
-    df_out = pd.DataFrame(results)
-    df_out = df_out.sort_values("Score", ascending=False)
-    df_out.reset_index(drop=True, inplace=True)
-
-    return df_out
-
-# ---------- Pullback Scanner (PATCHED) ----------
-
-def run_pullback_scanner(interval="1m"):
-    st.write(f"⚡ Running Pullback Scanner ({interval})…")
-    settings = st.session_state.settings
-
-    float_pass = [
-        t for t in TICKERS
-        if passes_float_filter(t, settings["max_float_millions"])
-    ]
-    if not float_pass:
-        return pd.DataFrame()
-
-    intraday = download_intraday_batches(float_pass, interval=interval, period="1d")
-    results = []
-
-    for ticker in float_pass:
-        df = intraday.get(ticker)
-        if df is None or df.empty:
-            continue
-
-        last_price = df["Close"].iloc[-1]
-        if last_price < settings["min_price"] or last_price > settings["max_price"]:
-            continue
-
-        df = compute_trend_metrics(df)
-        if df is None:
-            continue
-
-        last = df.iloc[-1]
-
-        # Pullback logic
-        if last["TrendStrong"] and last["EMA9"] * 0.995 <= last["Close"] <= last["EMA9"] * 1.01:
-            results.append({
-                "Ticker": ticker,
-                "Price": round(last_price, 2),
-                "EMA9": round(last["EMA9"], 2),
-                "EMA20": round(last["EMA20"], 2),
-            })
-
-    if not results:
-        return pd.DataFrame()
-
-    out = pd.DataFrame(results)
-    out.reset_index(drop=True, inplace=True)
-    return out
-
-def run_pullback_1m():
-    return run_pullback_scanner(interval="1m")
-
-def run_pullback_5m():
-    return run_pullback_scanner(interval="5m")
 # ============================================================
 # PART 5 — UI HELPERS
 # ============================================================
