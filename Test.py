@@ -319,7 +319,7 @@ def run_gap_scanner():
         last_close = d["Close"].iloc[-1]
         gap_pct = (last_close - prev_close) / prev_close * 100
 
-        if gap_pct < 2:
+        if gap_pct < st.session_state.settings["gap_min_pct"]:
             continue
 
         results.append({
