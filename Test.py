@@ -231,152 +231,135 @@ def is_new_hod(df):
     return df["High"].iloc[-1] >= df["High"].max()
 
 # ---------- Core Momentum Scanner (PATCHED) ----------
-
-def run_momentum_scanner(interval="1m"):
-    st.write(f"⚡ Running Momentum Scanner ({interval})…")
+def run_pro_scanner(interval="1m"):
+    st.write(f"🚀 Running PRO Scanner ({interval})…")
     settings = st.session_state.settings
 
-    # Float filter
+    # ---------------------------
+    # STEP 1 — GET ACTIVE STOCKS
+    # ---------------------------
     active = get_active_stocks()
 
     if not active:
         st.warning("No active stocks found")
         return pd.DataFrame()
 
-    # Scan ONLY movers
-    float_pass = active[:300]
-    if not float_pass:
+    st.write(f"Active stocks: {len(active)}")
+
+    # ---------------------------
+    # STEP 2 — LOAD DATA
+    # ---------------------------
+    daily = download_daily_data(active, period="1mo")
+    intraday = download_intraday_batches(active, interval=interval, period="1d")
+
+    if daily is None or not intraday:
         return pd.DataFrame()
 
-    # DAILY DATA (PATCHED)
-    daily = download_daily_data(float_pass, period="1mo")
-    if daily is None:   # <-- FIXED: removed daily.empty
-        return pd.DataFrame()
+    st.write(f"Intraday loaded: {len(intraday)}")
 
-    # INTRADAY DATA
-    intraday = download_intraday_batches(float_pass, interval=interval, period="1d")
     results = []
 
-    for ticker in float_pass:
+    # ---------------------------
+    # STEP 3 — LOOP
+    # ---------------------------
+    for ticker in active:
 
-        # Daily slice
         try:
             d = daily[ticker]
-        except Exception:
+            df = intraday.get(ticker)
+        except:
             continue
 
-        if d is None or d.empty or len(d) < 21:
+        if d is None or df is None or df.empty or len(df) < 20:
             continue
 
-        today_volume = d["Volume"].iloc[-1]
-        avg20_volume = d["Volume"].iloc[-21:-1].mean()
-        rvol = compute_rvol(today_volume, avg20_volume)
-
-        # TEMP: loosen RVOL massively
-        if rvol < 1.0:
+        # ---------------------------
+        # PRICE FILTER
+        # ---------------------------
+        price = df["Close"].iloc[-1]
+        if price < settings["min_price"] or price > settings["max_price"]:
             continue
 
-        # Intraday slice
-        df = intraday.get(ticker)
-        if df is None or df.empty:
+        # ---------------------------
+        # RVOL
+        # ---------------------------
+        today_vol = d["Volume"].iloc[-1]
+        avg_vol = d["Volume"].iloc[-21:-1].mean() if len(d) > 21 else d["Volume"].mean()
+        rvol = compute_rvol(today_vol, avg_vol)
+
+        # 🔥 loosened
+        if rvol < 0.8:
             continue
 
-        last_price = df["Close"].iloc[-1]
-        if last_price < settings["min_price"] or last_price > settings["max_price"]:
-            continue
-
+        # ---------------------------
+        # INDICATORS
+        # ---------------------------
         df = compute_trend_metrics(df)
         if df is None:
             continue
 
-        if not df["TrendStrong"].iloc[-1]:
-            continue
+        last = df.iloc[-1]
+
+        # ---------------------------
+        # CORE SIGNALS
+        # ---------------------------
+        ema_trend = last["EMA9"] > last["EMA20"]
+        above_vwap = last["Close"] > last["VWAP"]
+
+        # HOD breakout
         hod = df["High"].max()
-        price = df["Close"].iloc[-1]
+        near_hod = last["Close"] >= hod * 0.97
 
-        # Allow near breakout instead of exact HOD
-        if price < hod * 0.94:
+        # MICRO PULLBACK (KEY EDGE)
+        micro_pullback = (
+            last["EMA9"] * 0.995 <= last["Close"] <= last["EMA9"] * 1.02
+        )
+
+        # VOLUME SURGE
+        vol_spike = df["Volume"].iloc[-1] > df["Volume"].rolling(10).mean().iloc[-1]
+
+        # ---------------------------
+        # SCORING SYSTEM (🔥 CORE)
+        # ---------------------------
+        score = 0
+
+        if ema_trend:
+            score += 2
+        if above_vwap:
+            score += 2
+        if near_hod:
+            score += 2
+        if micro_pullback:
+            score += 2
+        if vol_spike:
+            score += 2
+
+        # ---------------------------
+        # FILTER MIN SCORE
+        # ---------------------------
+        if score < 4:
             continue
-
-        score = compute_momentum_score(df)
 
         results.append({
             "Ticker": ticker,
-            "Price": round(last_price, 2),
+            "Price": round(price, 2),
             "RVOL": round(rvol, 2),
-            "Trend Strong": "Yes",
-            "New HOD": "Yes",
-            "Momentum Score": score
+            "Score": score,
+            "Trend": "Yes" if ema_trend else "No",
+            "VWAP Hold": "Yes" if above_vwap else "No",
+            "Near HOD": "Yes" if near_hod else "No",
+            "Pullback": "Yes" if micro_pullback else "No",
+            "Vol Spike": "Yes" if vol_spike else "No",
         })
 
     if not results:
         return pd.DataFrame()
 
-    out = pd.DataFrame(results)
-    out = out.sort_values("Momentum Score", ascending=False)
-    out.reset_index(drop=True, inplace=True)
-    return out
+    df_out = pd.DataFrame(results)
+    df_out = df_out.sort_values("Score", ascending=False)
+    df_out.reset_index(drop=True, inplace=True)
 
-def run_momentum_1m():
-    return run_momentum_scanner(interval="1m")
-
-def run_momentum_5m():
-    return run_momentum_scanner(interval="5m")
-
-# ---------- Gap Scanner (PATCHED) ----------
-
-def run_gap_scanner():
-    st.write("⚡ Running Gap Scanner…")
-    settings = st.session_state.settings
-
-    daily = download_daily_data(TICKERS, period="5d")
-    if daily is None:   # <-- FIXED
-        return pd.DataFrame()
-
-    results = []
-    for ticker in TICKERS:
-        try:
-            d = daily[ticker]
-        except Exception:
-            continue
-
-        if d is None or d.empty or len(d) < 2:
-            continue
-
-        prev_close = d["Close"].iloc[-2]
-        last_close = d["Close"].iloc[-1]
-        gap_pct = (last_close - prev_close) / prev_close * 100
-
-        if gap_pct < settings["gap_min_pct"]:
-            continue
-
-        today_volume = d["Volume"].iloc[-1]
-        avg20_volume = d["Volume"].iloc[-min(21, len(d)):-1].mean()
-        rvol = compute_rvol(today_volume, avg20_volume)
-
-        if rvol < settings["min_rvol"]:
-            continue
-
-        if last_close < settings["min_price"] or last_close > settings["max_price"]:
-            continue
-
-        if not passes_float_filter(ticker, settings["max_float_millions"]):
-            continue
-
-        results.append({
-            "Ticker": ticker,
-            "Price": round(last_close, 2),
-            "Gap %": round(gap_pct, 2),
-            "RVOL": round(rvol, 2)
-        })
-
-    if not results:
-        return pd.DataFrame()
-
-    out = pd.DataFrame(results)
-    out = out.sort_values("Gap %", ascending=False)
-    out.reset_index(drop=True, inplace=True)
-    return out
+    return df_out
 
 # ---------- Pullback Scanner (PATCHED) ----------
 
