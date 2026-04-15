@@ -197,19 +197,27 @@ def vwap(df):
 def compute_trend_metrics(df):
     if df is None or df.empty:
         return None
-        
+
+    df = df.copy()
+    df["EMA9"] = ema(df["Close"], 9)
+    df["EMA20"] = ema(df["Close"], 20)
+    df["VWAP"] = vwap(df)
+
+    return df
+
+
+# ---------- ENTRY / EXIT ----------
+
 def calculate_trade_levels(df, setup_type="momentum"):
     if df is None or df.empty or len(df) < 5:
         return None, None, None
 
     last = df.iloc[-1]
 
-    # ---------- MOMENTUM ----------
     if setup_type == "momentum":
         entry = df["High"].iloc[-2]
         stop = df["Low"].iloc[-2]
 
-    # ---------- PULLBACK ----------
     elif setup_type == "pullback":
         entry = last["EMA9"]
         stop = df["Low"].rolling(5).min().iloc[-1]
@@ -224,16 +232,6 @@ def calculate_trade_levels(df, setup_type="momentum"):
     target = entry + (risk * 2)
 
     return round(entry, 2), round(stop, 2), round(target, 2)
-
-
-# ---------- PRO SCANNER ----------
-def run_pro_scanner(interval="1m"):
-
-    df = df.copy()
-    df["EMA9"] = ema(df["Close"], 9)
-    df["EMA20"] = ema(df["Close"], 20)
-    df["VWAP"] = vwap(df)
-    return df
 
 
 # ---------- PRO SCANNER ----------
@@ -288,22 +286,20 @@ def run_pro_scanner(interval="1m"):
         hod = df["High"].max()
         near_hod = last["Close"] >= hod * 0.90
 
-        score = 0
-
-        if ema_trend:
-            score += 2
-        if above_vwap:
-            score += 2
-        if near_hod:
-            score += 2
-
-        # 🔥 NEW: volume confirmation
         vol_spike = df["Volume"].iloc[-1] > df["Volume"].rolling(10).mean().iloc[-1]
-        if vol_spike:
-            score += 2
 
-        # 🔥 tighter filter
+        score = 0
+        if ema_trend: score += 2
+        if above_vwap: score += 2
+        if near_hod: score += 2
+        if vol_spike: score += 2
+
         if score < 4:
+            continue
+
+        entry, stop, target = calculate_trade_levels(df, "momentum")
+
+        if entry is None:
             continue
 
         results.append({
@@ -311,19 +307,22 @@ def run_pro_scanner(interval="1m"):
             "Price": round(price, 2),
             "RVOL": round(rvol, 2),
             "Score": score,
+            "Entry": entry,
+            "Stop": stop,
+            "Target": target,
             "Trend": "Yes" if ema_trend else "No",
             "VWAP Hold": "Yes" if above_vwap else "No",
             "Near HOD": "Yes" if near_hod else "No"
         })
 
-        if not results:
-            return pd.DataFrame()
+    if not results:
+        return pd.DataFrame()
 
-        df_out = pd.DataFrame(results)
-        df_out = df_out.sort_values("Score", ascending=False)
-        df_out.reset_index(drop=True, inplace=True)
+    df_out = pd.DataFrame(results)
+    df_out = df_out.sort_values("Score", ascending=False)
+    df_out.reset_index(drop=True, inplace=True)
 
-        return df_out
+    return df_out
 
 
 # ---------- GAP SCANNER ----------
@@ -367,7 +366,6 @@ def run_gap_scanner():
 def run_pullback_scanner(interval="1m"):
     st.write(f"⚡ Running Pullback Scanner ({interval})…")
 
-    # 🔥 ONLY scan active stocks (huge improvement)
     active = get_active_stocks()
 
     if not active:
@@ -390,16 +388,23 @@ def run_pullback_scanner(interval="1m"):
 
         trend = last["EMA9"] > last["EMA20"]
 
-        # 🔥 tighter pullback zone
         pullback_zone = (
             last["EMA9"] * 0.98 <= last["Close"] <= last["EMA9"] * 1.02
         )
 
         if trend and pullback_zone:
+
+            entry, stop, target = calculate_trade_levels(df, "pullback")
+
+            if entry is None:
+                continue
+
             results.append({
                 "Ticker": ticker,
                 "Price": round(last["Close"], 2),
-                "EMA9": round(last["EMA9"], 2)
+                "Entry": entry,
+                "Stop": stop,
+                "Target": target
             })
 
     if not results:
@@ -409,13 +414,6 @@ def run_pullback_scanner(interval="1m"):
     df_out.reset_index(drop=True, inplace=True)
 
     return df_out
-
-
-def run_pullback_1m():
-    return run_pullback_scanner("1m")
-
-def run_pullback_5m():
-    return run_pullback_scanner("5m")
 # ============================================================
 # PART 5 — UI HELPERS
 # ============================================================
