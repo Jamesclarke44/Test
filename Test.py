@@ -258,11 +258,21 @@ def run_pro_scanner(interval="1m"):
         near_hod = last["Close"] >= hod * 0.90
 
         score = 0
-        if ema_trend: score += 2
-        if above_vwap: score += 2
-        if near_hod: score += 2
 
-        if score < 2:
+        if ema_trend:
+            score += 2
+        if above_vwap:
+            score += 2
+        if near_hod:
+            score += 2
+
+        # 🔥 NEW: volume confirmation
+        vol_spike = df["Volume"].iloc[-1] > df["Volume"].rolling(10).mean().iloc[-1]
+        if vol_spike:
+            score += 2
+
+        # 🔥 tighter filter
+        if score < 4:
             continue
 
         results.append({
@@ -272,7 +282,14 @@ def run_pro_scanner(interval="1m"):
             "Score": score
         })
 
-    return pd.DataFrame(results)
+        if not results:
+            return pd.DataFrame()
+
+        df_out = pd.DataFrame(results)
+        df_out = df_out.sort_values("Score", ascending=False)
+        df_out.reset_index(drop=True, inplace=True)
+
+        return df_out
 
 
 # ---------- GAP SCANNER ----------
