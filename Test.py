@@ -1,171 +1,165 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
+import time
 import yfinance as yf
+import pandas as pd
+import streamlit as st
+import os
 
-# -----------------------------
-# Load tickers from tickers.txt
-# -----------------------------
-def load_tickers():
-    try:
-        with open("tickers.txt") as f:
-            tickers = [line.strip().upper() for line in f if line.strip()]
-        return tickers
-    except FileNotFoundError:
+# ---------------------------------------------------------
+# LOAD TICKERS FROM tickers.txt
+# ---------------------------------------------------------
+
+def load_tickers_from_file(path="tickers.txt"):
+    if not os.path.exists(path):
+        st.error(f"File not found: {path}")
         return []
 
+    with open(path, "r") as f:
+        tickers = [line.strip().upper() for line in f.readlines() if line.strip()]
 
-# -----------------------------
-# Real data fetcher (free)
-# -----------------------------
-def generate_realtime_data(tickers):
-    data = []
-
-    for ticker in tickers:
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-
-            current_price = info.get("regularMarketPrice")
-            prior_close = info.get("previousClose")
-            volume = info.get("volume")
-
-            if current_price is None or prior_close is None:
-                continue
-
-            gap_pct = ((current_price - prior_close) / prior_close) * 100
-
-            float_shares = info.get("floatShares")
-            if float_shares:
-                float_millions = float_shares / 1_000_000
-            else:
-                float_millions = 50  # fallback placeholder
-
-            data.append({
-                "ticker": ticker,
-                "prior_close": prior_close,
-                "current_price": current_price,
-                "premarket_volume": volume,  # placeholder
-                "float_millions": float_millions,
-                "rvol": 1.0,  # placeholder
-                "has_catalyst": False,  # placeholder
-                "gap_pct": gap_pct,
-            })
-
-        except Exception:
-            continue
-
-    return pd.DataFrame(data)
+    return tickers
 
 
-# -----------------------------
-# Ross-style filter logic
-# -----------------------------
-def apply_ross_filters(
-    df,
-    min_price=2.0,
-    max_price=20.0,
-    min_gap_pct=4.0,
-    min_premarket_volume=100_000,
-    max_float_millions=50.0,
-    min_rvol=3.0,
-    require_catalyst=True,
-):
-    filtered = df.copy()
+# ---------------------------------------------------------
+# FETCH DATA FOR A SINGLE TICKER
+# ---------------------------------------------------------
 
-    filtered = filtered[
-        (filtered["current_price"] >= min_price)
-        & (filtered["current_price"] <= max_price)
+def fetch_data_for_ticker(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+        return {
+            "ticker": ticker,
+            "price": info.get("regularMarketPrice"),
+            "float": info.get("sharesOutstanding"),
+            "has_catalyst": False,  # placeholder for your catalyst logic
+        }
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------
+# APPLY ROSS FILTERS (CORRECTED)
+# ---------------------------------------------------------
+
+def apply_ross_filters(df, min_price=2.0, max_float=50_000_000, require_catalyst=False):
+
+    # Normalize column names
+    rename_map = {
+        "price": "current_price",
+        "close": "current_price",
+        "last_price": "current_price",
+        "regularMarketPrice": "current_price",
+    }
+    df = df.rename(columns=rename_map)
+
+    # Safety checks
+    required = ["current_price", "float"]
+    missing = [c for c in required if c not in df.columns]
+
+    if missing:
+        st.error(f"Missing required columns: {missing}")
+        return df.iloc[0:0]
+
+    # Base filters
+    filtered = df[
+        (df["current_price"] >= min_price) &
+        (df["float"] <= max_float)
     ]
 
-    filtered = filtered[filtered["gap_pct"] >= min_gap_pct]
-    filtered = filtered[filtered["premarket_volume"] >= min_premarket_volume]
-    filtered = filtered[filtered["float_millions"] <= max_float_millions]
-    filtered = filtered[filtered["rvol"] >= min_rvol]
-
-    if require_catalyst:
+    # Optional catalyst filter
+    if require_catalyst and "has_catalyst" in filtered.columns:
         filtered = filtered[filtered["has_catalyst"] == True]
 
-    filtered = filtered.sort_values(by=["gap_pct"], ascending=False)
     return filtered
 
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-def main():
-    st.set_page_config(page_title="Ross Gap Scanner v1", layout="wide")
-    st.title("Ross-Style Gap Scanner v1 (Free Data Version)")
+# ---------------------------------------------------------
+# SCAN LOGIC WITH PROGRESS BAR
+# ---------------------------------------------------------
 
-    st.markdown(
-        """
-        This scanner uses **free Yahoo Finance data** to simulate a Ross Cameron–style
-        **gap scanner**.
+def run_scan(tickers, min_price, max_float, require_catalyst):
+    total = len(tickers)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-        **Filters included:**
-        - Price between **$2 and $20**
-        - Gap **> 4%**
-        - Volume (placeholder for premarket)
-        - Float **< 50M**
-        - RVOL (placeholder)
-        - Optional: **must have catalyst**
-        """
-    )
+    rows = []
 
-    # Load tickers from tickers.txt
-    tickers = load_tickers()
+    for i, t in enumerate(tickers):
+        progress = int((i + 1) / total * 100)
+        progress_bar.progress(progress)
+        status_text.write(f"Scanning {i+1} of {total}: {t}")
 
-    # Sidebar editable list
-    st.sidebar.header("Ticker Universe")
-    user_tickers = st.sidebar.text_area(
-        "Tickers (one per line or comma separated)",
-        value="\n".join(tickers)
-    )
+        row = fetch_data_for_ticker(t)
+        if row:
+            rows.append(row)
 
-    # Clean user input
-    tickers = [
-        t.strip().upper()
-        for t in user_tickers.replace(",", "\n").split("\n")
-        if t.strip()
-    ]
+        time.sleep(0.01)  # smooth animation
 
-    st.sidebar.header("Data Settings")
-    st.sidebar.write("Fetching real data...")
-    df = generate_realtime_data(tickers)
+    status_text.write("Scan complete.")
+    progress_bar.progress(100)
 
-    with st.expander("Raw Data (from Yahoo Finance)", expanded=False):
-        st.dataframe(df, use_container_width=True)
+    if not rows:
+        return pd.DataFrame()
 
-    st.sidebar.header("Ross Filter Settings")
-
-    min_price = st.sidebar.number_input("Min price", value=2.0, step=0.5)
-    max_price = st.sidebar.number_input("Max price", value=20.0, step=0.5)
-    min_gap_pct = st.sidebar.number_input("Min gap %", value=4.0, step=0.5)
-    min_premarket_volume = st.sidebar.number_input(
-        "Min volume", value=100_000, step=10_000
-    )
-    max_float_millions = st.sidebar.number_input(
-        "Max float (millions)", value=50.0, step=5.0
-    )
-    min_rvol = st.sidebar.number_input("Min RVOL", value=3.0, step=0.5)
-    require_catalyst = st.sidebar.checkbox("Require catalyst (news)", value=False)
-
+    df = pd.DataFrame(rows)
     filtered = apply_ross_filters(
         df,
         min_price=min_price,
-        max_price=max_price,
-        min_gap_pct=min_gap_pct,
-        min_premarket_volume=min_premarket_volume,
-        max_float_millions=max_float_millions,
-        min_rvol=min_rvol,
+        max_float=max_float,
         require_catalyst=require_catalyst,
     )
+    return filtered
 
-    st.subheader("Scanner Results")
-    st.write(f"Matches: **{len(filtered)}**")
-    st.dataframe(filtered, use_container_width=True)
+
+# ---------------------------------------------------------
+# MAIN APP
+# ---------------------------------------------------------
+
+def main():
+    st.set_page_config(page_title="Ross-Style Scanner", layout="wide")
+    st.title("Ross-Style Momentum Scanner")
+
+    # Load tickers from file
+    tickers = load_tickers_from_file("tickers.txt")
+    st.sidebar.write(f"Loaded {len(tickers)} tickers from tickers.txt")
+
+    # Sidebar settings
+    min_price = st.sidebar.number_input("Min Price", value=2.0, step=0.5)
+    max_float = st.sidebar.number_input("Max Float", value=50_000_000, step=1_000_000)
+    require_catalyst = st.sidebar.checkbox("Require Catalyst", value=False)
+
+    tab1, tab2 = st.tabs(["Main Scan", "Debug"])
+
+    with tab1:
+        st.subheader("Main Scan")
+
+        if st.button("Run Scan"):
+            with st.spinner("Running scan..."):
+                results = run_scan(
+                    tickers,
+                    min_price=min_price,
+                    max_float=max_float,
+                    require_catalyst=require_catalyst,
+                )
+
+            if results.empty:
+                st.warning("No tickers passed the filters.")
+            else:
+                st.success(f"{len(results)} tickers passed the filters.")
+                st.dataframe(results)
+
+    with tab2:
+        st.subheader("Debug: Raw Data")
+        if st.button("Fetch Raw Data Only"):
+            with st.spinner("Fetching raw data..."):
+                rows = [fetch_data_for_ticker(t) for t in tickers]
+                df_raw = pd.DataFrame([r for r in rows if r])
+
+            if df_raw.empty:
+                st.warning("No data fetched.")
+            else:
+                st.write("Columns:", df_raw.columns.tolist())
+                st.dataframe(df_raw)
 
 
 if __name__ == "__main__":
     main()
-
