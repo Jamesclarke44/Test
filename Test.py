@@ -23,17 +23,22 @@ def load_tickers_from_file(path="tickers.txt"):
 
 def fetch_data_for_ticker(ticker):
     try:
-        info = yf.Ticker(ticker).info
+        info = yf.Ticker(ticker).info or {}
 
-        price = info.get("regularMarketPrice")
+        # Extract raw fields
+        price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("lastPrice")
         prev_close = info.get("previousClose")
         vol = info.get("regularMarketVolume")
         avg_vol = info.get("averageDailyVolume10Day")
-        shares_out = info.get("sharesOutstanding")
+        shares_out = (
+            info.get("sharesOutstanding")
+            or info.get("floatShares")
+            or info.get("impliedSharesOutstanding")
+        )
 
         # % Change
         pct_change = None
-        if price is not None and prev_close not in (None, 0):
+        if price not in (None, 0) and prev_close not in (None, 0):
             pct_change = ((price - prev_close) / prev_close) * 100
 
         # RVOL
@@ -46,15 +51,15 @@ def fetch_data_for_ticker(ticker):
 
         return {
             "ticker": ticker,
-            "price": price,
-            "previous_close": prev_close,
+            "regularMarketPrice": price,
+            "previousClose": prev_close,
             "pct_change": pct_change,
             "volume": vol,
             "avg_volume_10d": avg_vol,
             "rvol": rvol,
-            "float": shares_out,
+            "sharesOutstanding": shares_out,
             "halted": halted,
-            "has_catalyst": False,  # placeholder for real news logic
+            "has_catalyst": False,  # placeholder
         }
     except Exception:
         return None
@@ -82,7 +87,9 @@ def fetch_batch(tickers, show_progress=False, label="Scanning"):
             status_text.write(f"{label} {i+1} of {total}: {t}")
 
         row = fetch_data_for_ticker(t)
-        if row:
+
+        # Skip tickers with missing or invalid price
+        if row and row.get("regularMarketPrice") not in (None, 0):
             rows.append(row)
 
         if show_progress:
@@ -133,20 +140,45 @@ def momentum_score(row):
 
 def apply_ross_filters(df, min_price, max_float, min_gap, min_rvol, min_premarket_vol, require_catalyst):
 
-    rename_map = {
-        "price": "current_price",
-        "pct_change": "pct_change",
-    }
-    df = df.rename(columns=rename_map)
+    # Safety: empty DF
+    if df is None or df.empty:
+        return df
 
-    # Required columns
-    required = ["current_price", "float"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        st.error(f"Missing required columns: {missing}")
-        return df.iloc[0:0]
+    # ---------------------------------------------------------
+    # NORMALIZE PRICE + FLOAT FIELDS (bulletproof)
+    # ---------------------------------------------------------
 
-    # Price + float
+    # Normalize price fields
+    price_fields = [
+        "regularMarketPrice",
+        "currentPrice",
+        "lastPrice",
+        "price",
+        "close",
+        "previousClose",
+    ]
+
+    df["current_price"] = None
+    for field in price_fields:
+        if field in df.columns:
+            df["current_price"] = df["current_price"].fillna(df[field])
+
+    # Normalize float fields
+    float_fields = [
+        "sharesOutstanding",
+        "floatShares",
+        "impliedSharesOutstanding",
+    ]
+
+    df["float"] = None
+    for field in float_fields:
+        if field in df.columns:
+            df["float"] = df["float"].fillna(df[field])
+
+    # Drop rows missing critical data
+    df = df.dropna(subset=["current_price", "float"])
+
+    # Price + float filters
     filtered = df[
         (df["current_price"] >= min_price) &
         (df["float"] <= max_float)
