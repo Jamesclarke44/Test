@@ -143,16 +143,16 @@ def download_intraday_batches(tickers, interval="1m", period="1d"):
 
     except Exception as e:
         st.write("Intraday download error:", e)
-        return {}
         
 # ============================================================
-# PART 4 — SCANNERS (CLEAN PRO VERSION)
+# PART 4 — SCANNERS (CLEAN + ENTRY / EXIT SYSTEM)
 # ============================================================
 
+# ---------- ACTIVE STOCKS ----------
 def get_active_stocks():
     try:
         data = yf.download(
-            tickers=TICKERS[:2000],
+            tickers=TICKERS[:1000],
             period="2d",
             interval="1d",
             group_by="ticker",
@@ -161,18 +161,16 @@ def get_active_stocks():
 
         movers = []
 
-        for t in TICKERS[:2000]:
+        for t in TICKERS[:1000]:
             try:
                 d = data[t]
                 if d is None or d.empty or len(d) < 2:
                     continue
 
-                prev_close = d["Close"].iloc[-2]
-                last_close = d["Close"].iloc[-1]
-                change_pct = (last_close - prev_close) / prev_close * 100
-                volume = d["Volume"].iloc[-1]
+                change_pct = (d["Close"].iloc[-1] - d["Close"].iloc[-2]) / d["Close"].iloc[-2] * 100
+                vol = d["Volume"].iloc[-1]
 
-                if change_pct > 1 and volume > 300000:
+                if change_pct > 1 and vol > 300000:
                     movers.append(t)
 
             except:
@@ -183,15 +181,13 @@ def get_active_stocks():
     except:
         return []
 
-# ---------- INDICATORS ----------
 
+# ---------- INDICATORS ----------
 def ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
 
 def vwap(df):
-    pv = (df["Close"] * df["Volume"]).cumsum()
-    vol = df["Volume"].cumsum()
-    return pv / vol
+    return (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
 
 def compute_trend_metrics(df):
     if df is None or df.empty:
@@ -203,81 +199,44 @@ def compute_trend_metrics(df):
     df["VWAP"] = vwap(df)
     return df
 
-# ---------- ENTRY / EXIT ----------
 
-def calculate_trade_levels(df, setup_type="momentum"):
-    if df is None or df.empty or len(df) < 5:
-        return None, None, None
+# ============================================================
+# 🔥 ENTRY / EXIT SIGNAL ENGINE
+# ============================================================
 
+def entry_exit_signals(df):
     last = df.iloc[-1]
 
-    if setup_type == "momentum":
-        entry = df["High"].iloc[-2]
-        stop = df["Low"].iloc[-2]
+    entry = False
+    exit_signal = False
 
-    elif setup_type == "pullback":
-        entry = last["EMA9"]
-        stop = df["Low"].rolling(5).min().iloc[-1]
+    # ENTRY CONDITIONS
+    if (
+        last["EMA9"] > last["EMA20"] and
+        last["Close"] > last["VWAP"] and
+        df["Volume"].iloc[-1] > df["Volume"].rolling(10).mean().iloc[-1]
+    ):
+        entry = True
 
-    else:
-        return None, None, None
+    # EXIT CONDITIONS
+    if (
+        last["EMA9"] < last["EMA20"] or
+        last["Close"] < last["VWAP"]
+    ):
+        exit_signal = True
 
-    risk = entry - stop
-    if risk <= 0:
-        return None, None, None
+    return entry, exit_signal
 
-    target = entry + (risk * 2)
 
-    return round(entry, 2), round(stop, 2), round(target, 2)
-
-# ---------- SIGNAL ENGINE ----------
-def generate_signals(df, setup_type="momentum"):
-    if df is None or df.empty or len(df) < 5:
-        return "WAIT"
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    if setup_type == "momentum":
-        breakout = last["Close"] > prev["High"]
-        volume_confirm = last["Volume"] > df["Volume"].rolling(5).mean().iloc[-1]
-
-        if breakout and volume_confirm:
-            return "BUY"
-
-    elif setup_type == "pullback":
-        bounce = (
-            prev["Close"] <= prev["EMA9"] and
-            last["Close"] > last["EMA9"]
-        )
-
-        if bounce:
-            return "BUY"
-
-    return "WAIT"
-
-# ---------- EXIT ENGINE ----------
-def check_exit(df, entry, stop, target):
-    if df is None or df.empty:
-        return "HOLD"
-
-    last_price = df["Close"].iloc[-1]
-
-    if stop is not None and last_price <= stop:
-        return "STOP HIT ❌"
-
-    if target is not None and last_price >= target:
-        return "TARGET HIT 🎯"
-
-    return "HOLD"
-# ---------- PRO SCANNER ----------
+# ============================================================
+# 🚀 PRO SCANNER
+# ============================================================
 
 def run_pro_scanner(interval="1m"):
     st.write(f"🚀 Running PRO Scanner ({interval})…")
     settings = st.session_state.settings
 
     active = get_active_stocks()
-
     if not active:
         return pd.DataFrame()
 
@@ -290,7 +249,6 @@ def run_pro_scanner(interval="1m"):
     results = []
 
     for ticker in active:
-
         try:
             d = daily[ticker]
             df = intraday.get(ticker)
@@ -301,12 +259,14 @@ def run_pro_scanner(interval="1m"):
             continue
 
         price = df["Close"].iloc[-1]
+
         if price < settings["min_price"] or price > settings["max_price"]:
             continue
 
+        # RVOL
         today_vol = d["Volume"].iloc[-1]
         avg_vol = d["Volume"].iloc[-21:-1].mean() if len(d) > 21 else d["Volume"].mean()
-        rvol = compute_rvol(today_vol, avg_vol)
+        rvol = today_vol / avg_vol if avg_vol else 0
 
         if rvol < 0.5:
             continue
@@ -315,27 +275,25 @@ def run_pro_scanner(interval="1m"):
         if df is None:
             continue
 
+        entry, exit_signal = entry_exit_signals(df)
+
         last = df.iloc[-1]
 
-        ema_trend = last["EMA9"] > last["EMA20"]
-        above_vwap = last["Close"] > last["VWAP"]
-        hod = df["High"].max()
-        near_hod = last["Close"] >= hod * 0.90
+        score = 0
+        if last["EMA9"] > last["EMA20"]:
+            score += 2
+        if last["Close"] > last["VWAP"]:
+            score += 2
+
+        near_hod = last["Close"] >= df["High"].max() * 0.95
+        if near_hod:
+            score += 2
 
         vol_spike = df["Volume"].iloc[-1] > df["Volume"].rolling(10).mean().iloc[-1]
-
-        score = 0
-        if ema_trend: score += 2
-        if above_vwap: score += 2
-        if near_hod: score += 2
-        if vol_spike: score += 2
+        if vol_spike:
+            score += 2
 
         if score < 4:
-            continue
-
-        entry, stop, target = calculate_trade_levels(df, "momentum")
-
-        if entry is None:
             continue
 
         results.append({
@@ -343,24 +301,17 @@ def run_pro_scanner(interval="1m"):
             "Price": round(price, 2),
             "RVOL": round(rvol, 2),
             "Score": score,
-            "Entry": entry,
-            "Stop": stop,
-            "Target": target,
-            "Trend": "Yes" if ema_trend else "No",
-            "VWAP Hold": "Yes" if above_vwap else "No",
-            "Near HOD": "Yes" if near_hod else "No"
+            "ENTRY": "YES" if entry else "—",
+            "EXIT": "YES" if exit_signal else "—",
+            "Trend": "Bullish" if last["EMA9"] > last["EMA20"] else "Bearish"
         })
 
-    if not results:
-        return pd.DataFrame()
+    return pd.DataFrame(results)
 
-    df_out = pd.DataFrame(results)
-    df_out = df_out.sort_values("Score", ascending=False)
-    df_out.reset_index(drop=True, inplace=True)
 
-    return df_out
-
-# ---------- GAP SCANNER ----------
+# ============================================================
+# ⚡ GAP SCANNER
+# ============================================================
 
 def run_gap_scanner():
     st.write("⚡ Running Gap Scanner…")
@@ -377,31 +328,32 @@ def run_gap_scanner():
         except:
             continue
 
-        if d is None or d.empty or len(d) < 2:
+        if d is None or len(d) < 2:
             continue
 
-        prev_close = d["Close"].iloc[-2]
-        last_close = d["Close"].iloc[-1]
-        gap_pct = (last_close - prev_close) / prev_close * 100
+        gap_pct = (d["Close"].iloc[-1] - d["Close"].iloc[-2]) / d["Close"].iloc[-2] * 100
 
         if gap_pct < st.session_state.settings["gap_min_pct"]:
             continue
 
         results.append({
             "Ticker": ticker,
-            "Price": round(last_close, 2),
-            "Gap %": round(gap_pct, 2)
+            "Price": round(d["Close"].iloc[-1], 2),
+            "Gap %": round(gap_pct, 2),
+            "ENTRY": "YES" if gap_pct > 5 else "WATCH"
         })
 
     return pd.DataFrame(results)
 
-# ---------- PULLBACK SCANNER ----------
+
+# ============================================================
+# 🔁PULLBACK SCANNER
+# ============================================================
 
 def run_pullback_scanner(interval="1m"):
     st.write(f"⚡ Running Pullback Scanner ({interval})…")
 
     active = get_active_stocks()
-
     if not active:
         return pd.DataFrame()
 
@@ -411,44 +363,37 @@ def run_pullback_scanner(interval="1m"):
 
     for ticker, df in intraday.items():
 
-        if df is None or df.empty or len(df) < 20:
+        if df is None or len(df) < 20:
             continue
 
         df = compute_trend_metrics(df)
         if df is None:
             continue
 
+        entry, exit_signal = entry_exit_signals(df)
+
         last = df.iloc[-1]
 
-        trend = last["EMA9"] > last["EMA20"]
-
-        pullback_zone = (
+        pullback = (
             last["EMA9"] * 0.98 <= last["Close"] <= last["EMA9"] * 1.02
         )
 
-        if trend and pullback_zone:
-
-            entry, stop, target = calculate_trade_levels(df, "pullback")
-
+        if last["EMA9"] > last["EMA20"] and pullback:
             results.append({
                 "Ticker": ticker,
                 "Price": round(last["Close"], 2),
-                "Entry": entry,
-                "Stop": stop,
-                "Target": target
+                "ENTRY": "YES" if entry else "—",
+                "EXIT": "YES" if exit_signal else "—"
             })
 
-    if not results:
-        return pd.DataFrame()
-        
     return pd.DataFrame(results)
+
 
 def run_pullback_1m():
     return run_pullback_scanner("1m")
 
 def run_pullback_5m():
     return run_pullback_scanner("5m")
-        
 # ============================================================
 # PART 5 — UI HELPERS
 # ============================================================
