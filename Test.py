@@ -4,6 +4,18 @@ import numpy as np
 import yfinance as yf
 
 # -----------------------------
+# Load tickers from tickers.txt
+# -----------------------------
+def load_tickers():
+    try:
+        with open("tickers.txt") as f:
+            tickers = [line.strip().upper() for line in f if line.strip()]
+        return tickers
+    except FileNotFoundError:
+        return []
+
+
+# -----------------------------
 # Real data fetcher (free)
 # -----------------------------
 def generate_realtime_data(tickers):
@@ -100,17 +112,24 @@ def main():
         """
     )
 
-    # Editable ticker list
-    tickers = [AAPL, TSLA, NVDA, AMD, PLTR, SOFI, RIOT, MARA, GME, AMC, BBBY, BILI, NIO, XPEV, LCID, SNAP, PINS, UBER, LYFT, AFRM, UPST, RBLX, HOOD, FSR, NKLA, DNA, WISH, SNDL, CGC, TLRY, BB, NOK, F, GM, T, VZ, BABA, JD, BIDU, COIN, SQ, PYPL, SHOP, NET, CRWD, ZM, DOCU, ROKU, DKNG, PENN, CCL, NCLH, AAL, DAL, UAL, JBLU, SAVE, RUN, ENPH, FSLR, SPWR, CHPT, BLNK, QS, RIVN, ENVX, IONQ, AI, PATH, MDB, DDOG, ZS, OKTA, TEAM, HUBS, ETSY, W, DASH, ABNB, EXPE, BKNG, MRNA, PFE, BNTX, NVAX, CVNA, OPEN, Z, RDFN, TOST, CELH, MNST, BYND, SBUX, CMG, WMT, COST, TGT, HD, LOW, DIS, PARA, WBD, NFLX, META, GOOG, MSFT, INTC, MU, SMCI, ARM, AVGO, LRCX, AMAT, TXN, ON, AEHR, ASML, CRSR, LOGI, JBL, HPQ, DELL, IBM, ORCL, SAP, CRM, NOW, INTU, ADP, V, MA, JPM, BAC, WFC, C, GS, MS, SCHW, USB, TD, BMO, RY, BNS, ENB, SU, CNQ, CVE, DVN, MRO, OXY, XOM, CVX, HAL, SLB, RIG, WTI, VTNR, INDO, IMPP, HUSA, BOIL, KOLD, LABU, LABD, TNA, TZA, SQQQ, TQQQ, UVXY, SVXY, SPY, QQQ, IWM, DIA, VIXY, VXX, BITF, HUT, CLSK, CORZ, WULF, BTBT, ATER, MULN, AERC, AEMD, ACRX, ACRS, ADIL, AEZS, AGLE, AGRX, AHT, AITX, AKBA, AKRO, ALDX, ALZN, AMAM, AMRS, ANIX, APDN, APGN, APRN, ARDX, ARQQ, ASNS, ATHE, ATNF, ATOS, AURA, AVCT, AVXL, AXLA, AYLA, BBIG, BCTX, BDRX, BFRI, BGLC, BIVI, BLBX, BLIN, BLRX, BNGO, BNOX, BOLT, BPTS, BRSH, BRQS, BRTX, BSFC, BTCS, BTDR, BTTX, BURU, BYSI]
+    # Load tickers from tickers.txt
+    tickers = load_tickers()
 
+    # Sidebar editable list
+    st.sidebar.header("Ticker Universe")
+    user_tickers = st.sidebar.text_area(
+        "Tickers (one per line or comma separated)",
+        value="\n".join(tickers)
+    )
+
+    # Clean user input
+    tickers = [
+        t.strip().upper()
+        for t in user_tickers.replace(",", "\n").split("\n")
+        if t.strip()
+    ]
 
     st.sidebar.header("Data Settings")
-    user_tickers = st.sidebar.text_area(
-        "Tickers (comma separated)",
-        value=",".join(tickers)
-    )
-    tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
-
     st.sidebar.write("Fetching real data...")
     df = generate_realtime_data(tickers)
 
