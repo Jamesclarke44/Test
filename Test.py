@@ -1,465 +1,150 @@
-# ============================================================
-# PART 1 — IMPORTS & UNIVERSE
-# ============================================================
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import datetime as dt
-from functools import lru_cache
 
-# ---------- Universe from CSV ----------
+# -----------------------------
+# Real data fetcher (free)
+# -----------------------------
+def generate_realtime_data(tickers):
+    data = []
 
-UNIVERSE_CSV = "tickers.csv"   # <--- change if needed
-UNIVERSE_COL = "Symbol"        # <--- change if needed
+    for ticker in tickers:
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
 
-@st.cache_data
-def load_universe():
-    try:
-        df = pd.read_csv(UNIVERSE_CSV)
-        tickers = df[UNIVERSE_COL].dropna().astype(str).unique().tolist()
-        # Basic cleaning: remove weird symbols
-        tickers = [t.strip().upper() for t in tickers if t.strip().isalpha()]
-        return tickers
-    except Exception as e:
-        st.error(f"Failed to load universe from {UNIVERSE_CSV}: {e}")
-        return []
+            current_price = info.get("regularMarketPrice")
+            prior_close = info.get("previousClose")
+            volume = info.get("volume")
 
-TICKERS = load_universe()
-# ============================================================
-# PART 2 — SETTINGS
-# ============================================================
-
-def init_settings():
-    if "settings" not in st.session_state:
-        st.session_state.settings = {
-            "min_price": 2.0,
-            "max_price": 20.0,
-            "min_rvol": 1.2,
-            "max_float_millions": 50.0,
-            "gap_min_pct": 5.0,
-            "require_catalyst": False,  # placeholder
-        }
-
-def settings_panel():
-    settings = st.session_state.settings
-    st.sidebar.header("Scanner Settings")
-
-    settings["min_price"] = st.sidebar.number_input("Min Price", 0.5, 100.0, settings["min_price"], 0.5)
-    settings["max_price"] = st.sidebar.number_input("Max Price", 1.0, 200.0, settings["max_price"], 0.5)
-    settings["min_rvol"] = st.sidebar.number_input("Min RVOL", 1.0, 20.0, settings["min_rvol"], 0.5)
-    settings["max_float_millions"] = st.sidebar.number_input("Max Float (M)", 1.0, 500.0, settings["max_float_millions"], 1.0)
-    settings["gap_min_pct"] = st.sidebar.number_input("Min Gap %", 1.0, 100.0, settings["gap_min_pct"], 1.0)
-    settings["require_catalyst"] = st.sidebar.checkbox("Require Catalyst (placeholder)", value=settings["require_catalyst"])
-# ============================================================
-# PART 3 — DATA LOADERS, FLOAT, RVOL
-# ============================================================
-
-# ---------- Float filter (placeholder: random-ish / demo) ----------
-
-@lru_cache(maxsize=4096)
-def get_float_millions(ticker: str) -> float:
-    # In production, replace with real float API
-    # For now, approximate using market cap / price if available
-    try:
-        info = yf.Ticker(ticker).info
-        shares = info.get("sharesOutstanding", None)
-        if shares is None:
-            return 1000.0  # treat as large float
-        return shares / 1_000_000.0
-    except Exception:
-        return 1000.0
-
-def passes_float_filter(ticker: str, max_float_millions: float) -> bool:
-    f = get_float_millions(ticker)
-    return f <= max_float_millions
-
-# ---------- Daily data & RVOL ----------
-
-@st.cache_data
-def download_daily_data(tickers, period="1mo"):
-    try:
-        data = yf.download(
-            tickers=tickers,
-            period=period,
-            interval="1d",
-            group_by="ticker",
-            auto_adjust=False,
-            threads=True,
-            progress=False
-        )
-        return data
-    except Exception:
-        return None
-
-def compute_rvol(today_volume, avg20_volume):
-    if avg20_volume is None or avg20_volume == 0:
-        return 0.0
-    return today_volume / avg20_volume
-
-# ---------- Intraday batch loader ----------
-@st.cache_data
-def download_intraday_batches(tickers, interval="1m", period="1d"):
-    try:
-        data = yf.download(
-            tickers=tickers,
-            period=period,
-            interval=interval,
-            group_by="ticker",
-            auto_adjust=False,
-            threads=True,
-            progress=False
-        )
-
-        result = {}
-
-        # MULTI-TICKER CASE
-        if isinstance(data.columns, pd.MultiIndex):
-            for t in tickers:
-                if t in data.columns.get_level_values(0):
-
-                    df_t = data[t].copy()
-
-                    # Only require Close (DON'T drop everything)
-                    df_t = df_t[df_t["Close"].notna()]
-
-                    if df_t.empty:
-                        continue
-
-                    df_t.index = df_t.index.tz_localize(None)
-                    result[t] = df_t
-
-        # SINGLE TICKER CASE
-        else:
-            df_t = data.copy()
-            df_t = df_t[df_t["Close"].notna()]
-
-            if not df_t.empty and len(tickers) == 1:
-                df_t.index = df_t.index.tz_localize(None)
-                result[tickers[0]] = df_t
-
-        return result
-
-    except Exception as e:
-        st.write("Intraday download error:", e)
-        
-# ============================================================
-# PART 4 — SCANNERS (CLEAN + ENTRY / EXIT SYSTEM)
-# ============================================================
-
-# ---------- ACTIVE STOCKS ----------
-def get_active_stocks():
-    try:
-        data = yf.download(
-            tickers=TICKERS[:1000],
-            period="2d",
-            interval="1d",
-            group_by="ticker",
-            progress=False
-        )
-
-        movers = []
-
-        for t in TICKERS[:1000]:
-            try:
-                d = data[t]
-                if d is None or d.empty or len(d) < 2:
-                    continue
-
-                change_pct = (d["Close"].iloc[-1] - d["Close"].iloc[-2]) / d["Close"].iloc[-2] * 100
-                vol = d["Volume"].iloc[-1]
-
-                if change_pct > 1 and vol > 300000:
-                    movers.append(t)
-
-            except:
+            if current_price is None or prior_close is None:
                 continue
 
-        return movers
+            gap_pct = ((current_price - prior_close) / prior_close) * 100
 
-    except:
-        return []
+            float_shares = info.get("floatShares")
+            if float_shares:
+                float_millions = float_shares / 1_000_000
+            else:
+                float_millions = 50  # fallback placeholder
 
-
-# ---------- INDICATORS ----------
-def ema(series, length):
-    return series.ewm(span=length, adjust=False).mean()
-
-def vwap(df):
-    return (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
-
-def compute_trend_metrics(df):
-    if df is None or df.empty:
-        return None
-
-    df = df.copy()
-    df["EMA9"] = ema(df["Close"], 9)
-    df["EMA20"] = ema(df["Close"], 20)
-    df["VWAP"] = vwap(df)
-    return df
-
-
-# ============================================================
-# 🔥 ENTRY / EXIT SIGNAL ENGINE
-# ============================================================
-
-def entry_exit_signals(df):
-    last = df.iloc[-1]
-
-    entry = False
-    exit_signal = False
-
-    # ENTRY CONDITIONS
-    if (
-        last["EMA9"] > last["EMA20"] and
-        last["Close"] > last["VWAP"] and
-        df["Volume"].iloc[-1] > df["Volume"].rolling(10).mean().iloc[-1]
-    ):
-        entry = True
-
-    # EXIT CONDITIONS
-    if (
-        last["EMA9"] < last["EMA20"] or
-        last["Close"] < last["VWAP"]
-    ):
-        exit_signal = True
-
-    return entry, exit_signal
-
-
-# ============================================================
-# 🚀 PRO SCANNER
-# ============================================================
-
-def run_pro_scanner(interval="1m"):
-    st.write(f"🚀 Running PRO Scanner ({interval})…")
-    settings = st.session_state.settings
-
-    active = get_active_stocks()
-    if not active:
-        return pd.DataFrame()
-
-    daily = download_daily_data(active, period="1mo")
-    intraday = download_intraday_batches(active, interval=interval, period="1d")
-
-    if daily is None or not intraday:
-        return pd.DataFrame()
-
-    results = []
-
-    for ticker in active:
-        try:
-            d = daily[ticker]
-            df = intraday.get(ticker)
-        except:
-            continue
-
-        if d is None or df is None or df.empty or len(df) < 20:
-            continue
-
-        price = df["Close"].iloc[-1]
-
-        if price < settings["min_price"] or price > settings["max_price"]:
-            continue
-
-        # RVOL
-        today_vol = d["Volume"].iloc[-1]
-        avg_vol = d["Volume"].iloc[-21:-1].mean() if len(d) > 21 else d["Volume"].mean()
-        rvol = today_vol / avg_vol if avg_vol else 0
-
-        if rvol < 0.5:
-            continue
-
-        df = compute_trend_metrics(df)
-        if df is None:
-            continue
-
-        entry, exit_signal = entry_exit_signals(df)
-
-        last = df.iloc[-1]
-
-        score = 0
-        if last["EMA9"] > last["EMA20"]:
-            score += 2
-        if last["Close"] > last["VWAP"]:
-            score += 2
-
-        near_hod = last["Close"] >= df["High"].max() * 0.95
-        if near_hod:
-            score += 2
-
-        vol_spike = df["Volume"].iloc[-1] > df["Volume"].rolling(10).mean().iloc[-1]
-        if vol_spike:
-            score += 2
-
-        if score < 4:
-            continue
-
-        results.append({
-            "Ticker": ticker,
-            "Price": round(price, 2),
-            "RVOL": round(rvol, 2),
-            "Score": score,
-            "ENTRY": "YES" if entry else "—",
-            "EXIT": "YES" if exit_signal else "—",
-            "Trend": "Bullish" if last["EMA9"] > last["EMA20"] else "Bearish"
-        })
-
-    return pd.DataFrame(results)
-
-
-# ============================================================
-# ⚡ GAP SCANNER
-# ============================================================
-
-def run_gap_scanner():
-    st.write("⚡ Running Gap Scanner…")
-
-    daily = download_daily_data(TICKERS, period="5d")
-    if daily is None:
-        return pd.DataFrame()
-
-    results = []
-
-    for ticker in TICKERS:
-        try:
-            d = daily[ticker]
-        except:
-            continue
-
-        if d is None or len(d) < 2:
-            continue
-
-        gap_pct = (d["Close"].iloc[-1] - d["Close"].iloc[-2]) / d["Close"].iloc[-2] * 100
-
-        if gap_pct < st.session_state.settings["gap_min_pct"]:
-            continue
-
-        results.append({
-            "Ticker": ticker,
-            "Price": round(d["Close"].iloc[-1], 2),
-            "Gap %": round(gap_pct, 2),
-            "ENTRY": "YES" if gap_pct > 5 else "WATCH"
-        })
-
-    return pd.DataFrame(results)
-
-
-# ============================================================
-# 🔁PULLBACK SCANNER
-# ============================================================
-
-def run_pullback_scanner(interval="1m"):
-    st.write(f"⚡ Running Pullback Scanner ({interval})…")
-
-    active = get_active_stocks()
-    if not active:
-        return pd.DataFrame()
-
-    intraday = download_intraday_batches(active[:300], interval=interval, period="1d")
-
-    results = []
-
-    for ticker, df in intraday.items():
-
-        if df is None or len(df) < 20:
-            continue
-
-        df = compute_trend_metrics(df)
-        if df is None:
-            continue
-
-        entry, exit_signal = entry_exit_signals(df)
-
-        last = df.iloc[-1]
-
-        pullback = (
-            last["EMA9"] * 0.98 <= last["Close"] <= last["EMA9"] * 1.02
-        )
-
-        if last["EMA9"] > last["EMA20"] and pullback:
-            results.append({
-                "Ticker": ticker,
-                "Price": round(last["Close"], 2),
-                "ENTRY": "YES" if entry else "—",
-                "EXIT": "YES" if exit_signal else "—"
+            data.append({
+                "ticker": ticker,
+                "prior_close": prior_close,
+                "current_price": current_price,
+                "premarket_volume": volume,  # placeholder
+                "float_millions": float_millions,
+                "rvol": 1.0,  # placeholder
+                "has_catalyst": False,  # placeholder
+                "gap_pct": gap_pct,
             })
 
-    return pd.DataFrame(results)
+        except Exception:
+            continue
+
+    return pd.DataFrame(data)
 
 
-def run_pullback_1m():
-    return run_pullback_scanner("1m")
+# -----------------------------
+# Ross-style filter logic
+# -----------------------------
+def apply_ross_filters(
+    df,
+    min_price=2.0,
+    max_price=20.0,
+    min_gap_pct=4.0,
+    min_premarket_volume=100_000,
+    max_float_millions=50.0,
+    min_rvol=3.0,
+    require_catalyst=True,
+):
+    filtered = df.copy()
 
-def run_pullback_5m():
-    return run_pullback_scanner("5m")
-# ============================================================
-# PART 5 — UI HELPERS
-# ============================================================
+    filtered = filtered[
+        (filtered["current_price"] >= min_price)
+        & (filtered["current_price"] <= max_price)
+    ]
 
-def render_results_table(df, title: str):
-    st.subheader(title)
-    if df is None or df.empty:
-        st.info("No setups found.")
-        return
-    st.dataframe(df, use_container_width=True)
+    filtered = filtered[filtered["gap_pct"] >= min_gap_pct]
+    filtered = filtered[filtered["premarket_volume"] >= min_premarket_volume]
+    filtered = filtered[filtered["float_millions"] <= max_float_millions]
+    filtered = filtered[filtered["rvol"] >= min_rvol]
 
-def render_summary(df, label: str):
-    if df is None or df.empty:
-        st.write(f"{label}: 0 results")
-    else:
-        st.write(f"{label}: {len(df)} results")
-# ============================================================
-# PART 6 — MAIN UI
-# ============================================================
+    if require_catalyst:
+        filtered = filtered[filtered["has_catalyst"] == True]
 
+    filtered = filtered.sort_values(by=["gap_pct"], ascending=False)
+    return filtered
+
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
 def main():
-    st.set_page_config(page_title="Full Market Scanner", layout="wide")
-    init_settings()
-    settings_panel()
+    st.set_page_config(page_title="Ross Gap Scanner v1", layout="wide")
+    st.title("Ross-Style Gap Scanner v1 (Free Data Version)")
 
-    st.title("Full U.S. Market Scanner")
-    st.caption("Momentum • Gap • Pullback — batch-based, Ross-style logic")
+    st.markdown(
+        """
+        This scanner uses **free Yahoo Finance data** to simulate a Ross Cameron–style
+        **gap scanner**.
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Momentum", "Gap", "Pullback", "Debug"])
+        **Filters included:**
+        - Price between **$2 and $20**
+        - Gap **> 4%**
+        - Volume (placeholder for premarket)
+        - Float **< 50M**
+        - RVOL (placeholder)
+        - Optional: **must have catalyst**
+        """
+    )
 
-    with tab1:
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Run Momentum 1m"):
-                df = run_pro_scanner("1m")
-                render_summary(df, "Momentum 1m")
-                render_results_table(df, "Momentum 1m Results")
-        with col2:
-            if st.button("Run Momentum 5m"):
-                df = run_pro_scanner("5m")
-                render_summary(df, "Momentum 5m")
-                render_results_table(df, "Momentum 5m Results")
+    # Editable ticker list
+    tickers = ["GME", "AMC", "AAPL", "TSLA", "NVDA", "PLTR", "SOFI", "MARA", "RIOT"]
 
-    with tab2:
-        if st.button("Run Gap Scanner"):
-            df = run_gap_scanner()
-            render_summary(df, "Gap Scanner")
-            render_results_table(df, "Gap Scanner Results")
+    st.sidebar.header("Data Settings")
+    user_tickers = st.sidebar.text_area(
+        "Tickers (comma separated)",
+        value=",".join(tickers)
+    )
+    tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
-    with tab3:
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Run Pullback 1m"):
-                df = run_pullback_1m()
-                render_summary(df, "Pullback 1m")
-                render_results_table(df, "Pullback 1m Results")
-        with col2:
-            if st.button("Run Pullback 5m"):
-                df = run_pullback_5m()
-                render_summary(df, "Pullback 5m")
-                render_results_table(df, "Pullback 5m Results")
+    st.sidebar.write("Fetching real data...")
+    df = generate_realtime_data(tickers)
 
-    with tab4:
-        st.write("Universe size:", len(TICKERS))
-        st.write("Universe sample:", TICKERS[:50])
+    with st.expander("Raw Data (from Yahoo Finance)", expanded=False):
+        st.dataframe(df, use_container_width=True)
+
+    st.sidebar.header("Ross Filter Settings")
+
+    min_price = st.sidebar.number_input("Min price", value=2.0, step=0.5)
+    max_price = st.sidebar.number_input("Max price", value=20.0, step=0.5)
+    min_gap_pct = st.sidebar.number_input("Min gap %", value=4.0, step=0.5)
+    min_premarket_volume = st.sidebar.number_input(
+        "Min volume", value=100_000, step=10_000
+    )
+    max_float_millions = st.sidebar.number_input(
+        "Max float (millions)", value=50.0, step=5.0
+    )
+    min_rvol = st.sidebar.number_input("Min RVOL", value=3.0, step=0.5)
+    require_catalyst = st.sidebar.checkbox("Require catalyst (news)", value=False)
+
+    filtered = apply_ross_filters(
+        df,
+        min_price=min_price,
+        max_price=max_price,
+        min_gap_pct=min_gap_pct,
+        min_premarket_volume=min_premarket_volume,
+        max_float_millions=max_float_millions,
+        min_rvol=min_rvol,
+        require_catalyst=require_catalyst,
+    )
+
+    st.subheader("Scanner Results")
+    st.write(f"Matches: **{len(filtered)}**")
+    st.dataframe(filtered, use_container_width=True)
+
 
 if __name__ == "__main__":
     main()
-    
