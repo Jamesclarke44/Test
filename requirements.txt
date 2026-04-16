@@ -1,8 +1,4 @@
 streamlit
 pandas
 numpy
-requests
-lxml
 yfinance
-ta
-matplotlib
