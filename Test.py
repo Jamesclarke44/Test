@@ -5,9 +5,10 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import (
-    StockLatestQuoteRequest,
     StockLatestTradeRequest,
     StockLatestBarRequest,
 )
@@ -42,17 +43,13 @@ def load_universe_from_file(path="tickers.txt"):
                 if line.startswith("#"):
                     continue
 
-                # Add ticker (uppercase, clean)
                 tickers.append(line.upper())
-
     except FileNotFoundError:
         print("tickers.txt not found. Using empty universe.")
         return []
-
     return tickers
 
 UNIVERSE = load_universe_from_file()
-
 
 # =========================
 # DATA HELPERS
@@ -60,7 +57,7 @@ UNIVERSE = load_universe_from_file()
 
 def fetch_alpaca_realtime(ticker: str):
     """
-    Get latest trade, quote, and bar from Alpaca.
+    Get latest trade and bar from Alpaca.
     Returns price, prev_close, volume.
     """
     try:
@@ -113,6 +110,20 @@ def compute_gap_pct(price, prev_close):
 
 
 # =========================
+# MOMENTUM SCORE (A)
+# =========================
+
+def compute_momentum(gap_pct, rvol):
+    """
+    Simple momentum score:
+    Momentum = Gap% * 1.0 + RVOL * 2.0
+    """
+    if gap_pct is None or rvol is None:
+        return None
+    return (gap_pct * 1.0) + (rvol * 2.0)
+
+
+# =========================
 # CATALYST DETECTION
 # =========================
 
@@ -152,38 +163,54 @@ def check_catalyst_newsapi(ticker: str):
 
 
 # =========================
-# SCAN LOGIC
+# SCAN LOGIC (D: MULTI-THREADED)
 # =========================
 
+def process_ticker(t):
+    """Process a single ticker (runs in a thread)."""
+    price, prev_close, volume = fetch_alpaca_realtime(t)
+    if price is None or prev_close is None or volume is None:
+        return None
+
+    avg_vol_10d, float_shares = fetch_yahoo_fundamentals(t)
+
+    gap_pct = compute_gap_pct(price, prev_close)
+    rvol = compute_rvol(volume, avg_vol_10d)
+    momentum = compute_momentum(gap_pct, rvol)
+
+    has_catalyst, catalyst_title = check_catalyst_newsapi(t)
+
+    return {
+        "Ticker": t,
+        "Price": price,
+        "Prev Close": prev_close,
+        "Gap %": gap_pct,
+        "Volume": volume,
+        "Avg Vol 10D": avg_vol_10d,
+        "RVOL": rvol,
+        "Momentum": momentum,
+        "Float": float_shares,
+        "Has Catalyst": has_catalyst,
+        "Catalyst Headline": catalyst_title,
+    }
+
+
 def scan_universe(tickers):
+    """Multi-threaded scanning for speed."""
     rows = []
 
-    for t in tickers:
-        price, prev_close, volume = fetch_alpaca_realtime(t)
-        if price is None or prev_close is None or volume is None:
-            continue
+    if not tickers:
+        return pd.DataFrame()
 
-        avg_vol_10d, float_shares = fetch_yahoo_fundamentals(t)
+    max_threads = min(40, len(tickers))
 
-        gap_pct = compute_gap_pct(price, prev_close)
-        rvol = compute_rvol(volume, avg_vol_10d)
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        futures = {executor.submit(process_ticker, t): t for t in tickers}
 
-        has_catalyst, catalyst_title = check_catalyst_newsapi(t)
-
-        rows.append(
-            {
-                "Ticker": t,
-                "Price": price,
-                "Prev Close": prev_close,
-                "Gap %": gap_pct,
-                "Volume": volume,
-                "Avg Vol 10D": avg_vol_10d,
-                "RVOL": rvol,
-                "Float": float_shares,
-                "Has Catalyst": has_catalyst,
-                "Catalyst Headline": catalyst_title,
-            }
-        )
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                rows.append(result)
 
     if not rows:
         return pd.DataFrame()
@@ -195,6 +222,8 @@ def scan_universe(tickers):
         df["Gap %"] = df["Gap %"].round(2)
     if "RVOL" in df.columns:
         df["RVOL"] = df["RVOL"].round(2)
+    if "Momentum" in df.columns:
+        df["Momentum"] = df["Momentum"].round(2)
 
     return df
 
@@ -241,26 +270,27 @@ def main():
             st.warning("No tickers matched your filters.")
             return
 
-        # Sort by Gap % descending
-        df = df.sort_values(by="Gap %", ascending=False)
+        # Sort by Momentum (A)
+        if "Momentum" in df.columns:
+            df = df.sort_values(by="Momentum", ascending=False)
+        else:
+            df = df.sort_values(by="Gap %", ascending=False)
 
         st.subheader("Scan Results")
-        st.dataframe(
-            df[
-                [
-                    "Ticker",
-                    "Price",
-                    "Gap %",
-                    "RVOL",
-                    "Volume",
-                    "Float",
-                    "Has Catalyst",
-                    "Catalyst Headline",
-                ]
-            ],
-            use_container_width=True,
-        )
+        cols = [
+            "Ticker",
+            "Price",
+            "Gap %",
+            "RVOL",
+            "Momentum",
+            "Volume",
+            "Float",
+            "Has Catalyst",
+            "Catalyst Headline",
+        ]
+        cols = [c for c in cols if c in df.columns]
 
+        st.dataframe(df[cols], use_container_width=True)
         st.success(f"Found {len(df)} matching tickers.")
 
     else:
