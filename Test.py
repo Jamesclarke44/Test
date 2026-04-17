@@ -1,310 +1,247 @@
-import time
 import os
-import yfinance as yf
+import math
+import requests
 import pandas as pd
+import yfinance as yf
 import streamlit as st
 
-# ---------------------------------------------------------
-# LOAD TICKERS FROM tickers.txt
-# ---------------------------------------------------------
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import (
+    StockLatestQuoteRequest,
+    StockLatestTradeRequest,
+    StockLatestBarRequest,
+)
+from alpaca.data.timeframe import TimeFrame
 
-def load_tickers_from_file(path="tickers.txt"):
-    if not os.path.exists(path):
-        st.error(f"File not found: {path}")
-        return []
-    with open(path, "r") as f:
-        tickers = [line.strip().upper() for line in f.readlines() if line.strip()]
-    return tickers
+# =========================
+# CONFIG: INSERT YOUR KEYS
+# =========================
+
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "YOUR_ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "YOUR_ALPACA_SECRET_KEY")
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "YOUR_NEWSAPI_KEY")
+
+alpaca = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+
+# Simple universe for demo – replace with your tickers.txt loader
+UNIVERSE = [
+    "AAPL", "TSLA", "NVDA", "AMD", "META", "MSFT", "AMZN", "NFLX",
+    "BABA", "SHOP", "PLTR", "ROKU", "SQ", "COIN", "CRWD", "PANW",
+]
 
 
-# ---------------------------------------------------------
-# FETCH DATA FOR A SINGLE TICKER (Ross-style fields)
-# ---------------------------------------------------------
+CATALYST_KEYWORDS = [
+    "earnings", "guidance", "upgrade", "downgrade", "beats", "misses",
+    "FDA", "approval", "trial", "phase", "contract", "partnership",
+    "acquisition", "merger", "record", "revenue", "outlook",
+]
 
-def fetch_data_for_ticker(ticker):
+
+# =========================
+# DATA HELPERS
+# =========================
+
+def fetch_alpaca_realtime(ticker: str):
+    """
+    Get latest trade, quote, and bar from Alpaca.
+    Returns price, prev_close, volume.
+    """
+    try:
+        trade = alpaca.get_stock_latest_trade(
+            StockLatestTradeRequest(symbol_or_symbols=ticker)
+        )[ticker]
+
+        bar = alpaca.get_stock_latest_bar(
+            StockLatestBarRequest(symbol_or_symbols=ticker)
+        )[ticker]
+
+        price = float(trade.price)
+        prev_close = float(bar.close)
+        volume = int(bar.volume)
+
+        return price, prev_close, volume
+    except Exception:
+        return None, None, None
+
+
+def fetch_yahoo_fundamentals(ticker: str):
+    """
+    Use yfinance for float + 10-day avg volume.
+    """
     try:
         info = yf.Ticker(ticker).info or {}
-
-        # Extract raw fields
-        price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("lastPrice")
-        prev_close = info.get("previousClose")
-        vol = info.get("regularMarketVolume")
-        avg_vol = info.get("averageDailyVolume10Day")
-        shares_out = (
-            info.get("sharesOutstanding")
-            or info.get("floatShares")
-            or info.get("impliedSharesOutstanding")
-        )
-
-        # % Change
-        pct_change = None
-        if price not in (None, 0) and prev_close not in (None, 0):
-            pct_change = ((price - prev_close) / prev_close) * 100
-
-        # RVOL
-        rvol = None
-        if vol not in (None, 0) and avg_vol not in (None, 0):
-            rvol = vol / avg_vol
-
-        # Halt detector
-        halted = info.get("tradeable", True) is False
-
-        return {
-            "ticker": ticker,
-            "regularMarketPrice": price,
-            "previousClose": prev_close,
-            "pct_change": pct_change,
-            "volume": vol,
-            "avg_volume_10d": avg_vol,
-            "rvol": rvol,
-            "sharesOutstanding": shares_out,
-            "halted": halted,
-            "has_catalyst": False,  # placeholder
-        }
     except Exception:
+        info = {}
+
+    avg_vol_10d = info.get("averageDailyVolume10Day")
+    float_shares = (
+        info.get("floatShares")
+        or info.get("sharesOutstanding")
+        or info.get("impliedSharesOutstanding")
+    )
+
+    return avg_vol_10d, float_shares
+
+
+def compute_rvol(volume, avg_vol_10d):
+    if not volume or not avg_vol_10d or avg_vol_10d == 0:
         return None
+    return volume / avg_vol_10d
 
 
-# ---------------------------------------------------------
-# BATCH FETCH WITH OPTIONAL PROGRESS BAR
-# ---------------------------------------------------------
+def compute_gap_pct(price, prev_close):
+    if not price or not prev_close or prev_close == 0:
+        return None
+    return (price - prev_close) / prev_close * 100.0
 
-def fetch_batch(tickers, show_progress=False, label="Scanning"):
+
+# =========================
+# CATALYST DETECTION
+# =========================
+
+def check_catalyst_newsapi(ticker: str):
+    """
+    Very simple catalyst detector using NewsAPI headlines.
+    Returns (has_catalyst: bool, first_match_title: str or None)
+    """
+    if not NEWSAPI_KEY or NEWSAPI_KEY == "YOUR_NEWSAPI_KEY":
+        return False, None
+
+    try:
+        url = (
+            "https://newsapi.org/v2/everything"
+            f"?q={ticker}&language=en&sortBy=publishedAt&pageSize=10&apiKey={NEWSAPI_KEY}"
+        )
+        r = requests.get(url, timeout=5)
+        data = r.json()
+    except Exception:
+        return False, None
+
+    articles = data.get("articles", [])
+    for a in articles:
+        title = (a.get("title") or "").lower()
+        if not title:
+            continue
+        for kw in CATALYST_KEYWORDS:
+            if kw.lower() in title:
+                return True, a.get("title")
+    return False, None
+
+
+# =========================
+# SCAN LOGIC
+# =========================
+
+def scan_universe(tickers):
     rows = []
-    total = len(tickers)
 
-    if show_progress:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-    else:
-        progress_bar = None
-        status_text = None
+    for t in tickers:
+        price, prev_close, volume = fetch_alpaca_realtime(t)
+        if price is None or prev_close is None or volume is None:
+            continue
 
-    for i, t in enumerate(tickers):
-        if show_progress:
-            progress = int((i + 1) / total * 100)
-            progress_bar.progress(progress)
-            status_text.write(f"{label} {i+1} of {total}: {t}")
+        avg_vol_10d, float_shares = fetch_yahoo_fundamentals(t)
 
-        row = fetch_data_for_ticker(t)
+        gap_pct = compute_gap_pct(price, prev_close)
+        rvol = compute_rvol(volume, avg_vol_10d)
 
-        # Skip tickers with missing or invalid price
-        if row and row.get("regularMarketPrice") not in (None, 0):
-            rows.append(row)
+        has_catalyst, catalyst_title = check_catalyst_newsapi(t)
 
-        if show_progress:
-            time.sleep(0.01)
-
-    if show_progress:
-        status_text.write(f"{label} complete.")
-        progress_bar.progress(100)
+        rows.append(
+            {
+                "Ticker": t,
+                "Price": price,
+                "Prev Close": prev_close,
+                "Gap %": gap_pct,
+                "Volume": volume,
+                "Avg Vol 10D": avg_vol_10d,
+                "RVOL": rvol,
+                "Float": float_shares,
+                "Has Catalyst": has_catalyst,
+                "Catalyst Headline": catalyst_title,
+            }
+        )
 
     if not rows:
         return pd.DataFrame()
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+
+    # Clean formatting
+    if "Gap %" in df.columns:
+        df["Gap %"] = df["Gap %"].round(2)
+    if "RVOL" in df.columns:
+        df["RVOL"] = df["RVOL"].round(2)
+
+    return df
 
 
-# ---------------------------------------------------------
-# MOMENTUM SCORING (Ross A-Setup Logic)
-# ---------------------------------------------------------
-
-def momentum_score(row):
-    score = 0
-
-    # Gap size
-    if row.get("pct_change"):
-        score += row["pct_change"] * 1.0
-
-    # RVOL
-    if row.get("rvol"):
-        score += row["rvol"] * 10
-
-    # Float bonus
-    if row.get("float"):
-        if row["float"] < 10_000_000:
-            score += 20
-        elif row["float"] < 20_000_000:
-            score += 10
-
-    # Catalyst bonus
-    if row.get("has_catalyst"):
-        score += 25
-
-    return score
-
-
-# ---------------------------------------------------------
-# CORE ROSS FILTERS (A–D integrated)
-# ---------------------------------------------------------
-
-def apply_ross_filters(df, min_price, max_float, min_gap, min_rvol, min_premarket_vol, require_catalyst):
-
-    # Safety: empty DF
-    if df is None or df.empty:
-        return df
-
-    # ---------------------------------------------------------
-    # NORMALIZE PRICE + FLOAT FIELDS (bulletproof)
-    # ---------------------------------------------------------
-
-    # Normalize price fields
-    price_fields = [
-        "regularMarketPrice",
-        "currentPrice",
-        "lastPrice",
-        "price",
-        "close",
-        "previousClose",
-    ]
-
-    df["current_price"] = None
-    for field in price_fields:
-        if field in df.columns:
-            df["current_price"] = df["current_price"].fillna(df[field])
-
-    # Normalize float fields
-    float_fields = [
-        "sharesOutstanding",
-        "floatShares",
-        "impliedSharesOutstanding",
-    ]
-
-    df["float"] = None
-    for field in float_fields:
-        if field in df.columns:
-            df["float"] = df["float"].fillna(df[field])
-
-    # Drop rows missing critical data
-    df = df.dropna(subset=["current_price", "float"])
-
-    # Price + float filters
-    filtered = df[
-        (df["current_price"] >= min_price) &
-        (df["float"] <= max_float)
-    ]
-
-    # Gap filter
-    if "pct_change" in filtered.columns:
-        filtered = filtered[filtered["pct_change"] >= min_gap]
-
-    # Premarket volume filter
-    if "volume" in filtered.columns:
-        filtered = filtered[filtered["volume"] >= min_premarket_vol]
-
-    # RVOL filter
-    if "rvol" in filtered.columns:
-        filtered = filtered[filtered["rvol"] >= min_rvol]
-
-    # Catalyst filter
-    if require_catalyst and "has_catalyst" in filtered.columns:
-        filtered = filtered[filtered["has_catalyst"] == True]
-
-    return filtered
-
-
-# ---------------------------------------------------------
-# GAP VIEW / MOMENTUM VIEW / HOT LIST
-# ---------------------------------------------------------
-
-def build_gap_view(df):
-    return df.sort_values("pct_change", ascending=False)
-
-
-def build_momentum_view(df):
-    return df.sort_values("rvol", ascending=False)
-
-
-def build_hot_list(df, top_n=10):
-    df = df.copy()
-    df["momentum_score"] = df.apply(momentum_score, axis=1)
-    return df.sort_values("momentum_score", ascending=False).head(top_n)
-
-
-# ---------------------------------------------------------
-# MAIN APP (Ross MAX)
-# ---------------------------------------------------------
+# =========================
+# STREAMLIT UI
+# =========================
 
 def main():
-    st.set_page_config(page_title="Ross MAX Scanner", layout="wide")
-    st.title("Ross MAX Momentum Scanner")
+    st.set_page_config(page_title="Alpaca + Catalyst Scanner", layout="wide")
+    st.title("Alpaca Real‑Time + Catalyst Scanner")
 
-    tickers = load_tickers_from_file("tickers.txt")
-    st.sidebar.write(f"Loaded {len(tickers)} tickers")
-
-    # Sidebar filters
-    st.sidebar.header("Ross Filters")
-    min_price = st.sidebar.number_input("Min Price", value=2.0)
-    max_float = st.sidebar.number_input("Max Float", value=50_000_000)
-    min_gap = st.sidebar.number_input("Min Gap %", value=4.0)
-    min_rvol = st.sidebar.number_input("Min RVOL", value=2.0)
-    min_premarket_vol = st.sidebar.number_input("Min Premarket Volume", value=100_000)
-    require_catalyst = st.sidebar.checkbox("Require Catalyst", value=False)
-
-    tab_gap, tab_momo, tab_hot, tab_halts, tab_universe, tab_debug = st.tabs(
-        ["Gap Scanner", "Momentum", "Hot List", "Halts", "Universe Scan", "Debug"]
+    st.markdown(
+        "Real‑time price/volume from **Alpaca**, float/avg volume from **Yahoo**, "
+        "and catalyst detection via **NewsAPI**."
     )
 
-    # ---------------- GAP SCANNER ----------------
-    with tab_gap:
-        st.subheader("Gap Scanner")
-        if st.button("Run Gap Scan"):
-            with st.spinner("Scanning gappers..."):
-                df = fetch_batch(tickers)
-                df = apply_ross_filters(df, min_price, max_float, min_gap, min_rvol, min_premarket_vol, require_catalyst)
-                gappers = build_gap_view(df)
+    st.sidebar.header("Scan Settings")
 
-            st.dataframe(gappers)
+    min_gap = st.sidebar.number_input("Min Gap %", value=3.0, step=0.5)
+    min_rvol = st.sidebar.number_input("Min RVOL", value=1.5, step=0.1)
+    require_catalyst = st.sidebar.checkbox("Require Catalyst", value=False)
 
-    # ---------------- MOMENTUM ----------------
-    with tab_momo:
-        st.subheader("Momentum Scanner")
-        if st.button("Run Momentum Scan"):
-            with st.spinner("Scanning momentum..."):
-                df = fetch_batch(tickers)
-                df = apply_ross_filters(df, min_price, max_float, min_gap, min_rvol, min_premarket_vol, require_catalyst)
-                movers = build_momentum_view(df)
+    st.sidebar.write("---")
+    st.sidebar.write(f"Universe size: {len(UNIVERSE)} tickers")
 
-            st.dataframe(movers)
+    if st.button("Run Scan"):
+        with st.spinner("Scanning universe with Alpaca + NewsAPI..."):
+            df = scan_universe(UNIVERSE)
 
-    # ---------------- HOT LIST ----------------
-    with tab_hot:
-        st.subheader("Hot List (Top Momentum Scores)")
-        if st.button("Build Hot List"):
-            with st.spinner("Building hot list..."):
-                df = fetch_batch(tickers)
-                df = apply_ross_filters(df, min_price, max_float, min_gap, min_rvol, min_premarket_vol, require_catalyst)
-                hot = build_hot_list(df)
+        if df.empty:
+            st.warning("No data returned. Check keys, market hours, or universe.")
+            return
 
-            st.dataframe(hot)
+        # Apply filters
+        if "Gap %" in df.columns:
+            df = df[df["Gap %"].notna() & (df["Gap %"] >= min_gap)]
+        if "RVOL" in df.columns:
+            df = df[df["RVOL"].notna() & (df["RVOL"] >= min_rvol)]
+        if require_catalyst and "Has Catalyst" in df.columns:
+            df = df[df["Has Catalyst"] == True]
 
-    # ---------------- HALTS ----------------
-    with tab_halts:
-        st.subheader("Halt Detector")
-        if st.button("Scan for Halts"):
-            with st.spinner("Checking halts..."):
-                df = fetch_batch(tickers)
-                halted = df[df["halted"] == True]
+        if df.empty:
+            st.warning("No tickers matched your filters.")
+            return
 
-            st.dataframe(halted)
+        # Sort by Gap % descending
+        df = df.sort_values(by="Gap %", ascending=False)
 
-    # ---------------- UNIVERSE SCAN ----------------
-    with tab_universe:
-        st.subheader("Full Universe Scan (with progress bar)")
-        if st.button("Run Full Scan"):
-            with st.spinner("Scanning full universe..."):
-                df = fetch_batch(tickers, show_progress=True)
-                results = apply_ross_filters(df, min_price, max_float, min_gap, min_rvol, min_premarket_vol, require_catalyst)
+        st.subheader("Scan Results")
+        st.dataframe(
+            df[
+                [
+                    "Ticker",
+                    "Price",
+                    "Gap %",
+                    "RVOL",
+                    "Volume",
+                    "Float",
+                    "Has Catalyst",
+                    "Catalyst Headline",
+                ]
+            ],
+            use_container_width=True,
+        )
 
-            st.dataframe(results)
+        st.success(f"Found {len(df)} matching tickers.")
 
-    # ---------------- DEBUG ----------------
-    with tab_debug:
-        st.subheader("Debug: Raw Data")
-        if st.button("Fetch Raw Data"):
-            df_raw = fetch_batch(tickers)
-            st.write(df_raw.columns.tolist())
-            st.dataframe(df_raw)
+    else:
+        st.info("Set your filters, then click **Run Scan**.")
 
 
 if __name__ == "__main__":
