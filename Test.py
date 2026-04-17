@@ -6,6 +6,8 @@ import yfinance as yf
 import streamlit as st
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, time
+import pytz
 
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import (
@@ -34,15 +36,10 @@ def load_universe_from_file(path="tickers.txt"):
         with open(path, "r") as f:
             for line in f:
                 line = line.strip()
-
-                # Skip empty lines
                 if not line:
                     continue
-
-                # Skip header lines (anything starting with #)
                 if line.startswith("#"):
                     continue
-
                 tickers.append(line.upper())
     except FileNotFoundError:
         print("tickers.txt not found. Using empty universe.")
@@ -56,10 +53,6 @@ UNIVERSE = load_universe_from_file()
 # =========================
 
 def fetch_alpaca_realtime(ticker: str):
-    """
-    Get latest trade and bar from Alpaca.
-    Returns price, prev_close, volume.
-    """
     try:
         trade = alpaca.get_stock_latest_trade(
             StockLatestTradeRequest(symbol_or_symbols=ticker)
@@ -79,9 +72,6 @@ def fetch_alpaca_realtime(ticker: str):
 
 
 def fetch_yahoo_fundamentals(ticker: str):
-    """
-    Use yfinance for float + 10-day avg volume.
-    """
     try:
         info = yf.Ticker(ticker).info or {}
     except Exception:
@@ -114,10 +104,6 @@ def compute_gap_pct(price, prev_close):
 # =========================
 
 def compute_momentum(gap_pct, rvol):
-    """
-    Simple momentum score:
-    Momentum = Gap% * 1.0 + RVOL * 2.0
-    """
     if gap_pct is None or rvol is None:
         return None
     return (gap_pct * 1.0) + (rvol * 2.0)
@@ -134,11 +120,7 @@ CATALYST_KEYWORDS = [
 ]
 
 def check_catalyst_newsapi(ticker: str):
-    """
-    Simple catalyst detector using NewsAPI headlines.
-    Returns (has_catalyst: bool, first_match_title: str or None)
-    """
-    if not NEWSAPI_KEY or NEWSAPI_KEY == "YOUR_NEWSAPI_KEY":
+    if not NEWSAPI_KEY:
         return False, None
 
     try:
@@ -163,11 +145,73 @@ def check_catalyst_newsapi(ticker: str):
 
 
 # =========================
-# SCAN LOGIC (D: MULTI-THREADED)
+# VWAP DEVIATION (E)
+# =========================
+
+def fetch_vwap(ticker):
+    try:
+        bar = alpaca.get_stock_latest_bar(
+            StockLatestBarRequest(symbol_or_symbols=ticker)
+        )[ticker]
+        return bar.vwap if hasattr(bar, "vwap") else None
+    except:
+        return None
+
+
+# =========================
+# ATR FILTER (F)
+# =========================
+
+def fetch_atr(ticker, period=14):
+    try:
+        data = yf.download(ticker, period="30d", interval="1d", progress=False)
+        if len(data) < period:
+            return None
+
+        data["H-L"] = data["High"] - data["Low"]
+        data["H-PC"] = abs(data["High"] - data["Close"].shift(1))
+        data["L-PC"] = abs(data["Low"] - data["Close"].shift(1))
+        data["TR"] = data[["H-L", "H-PC", "L-PC"]].max(axis=1)
+        atr = data["TR"].rolling(period).mean().iloc[-1]
+        return atr
+    except:
+        return None
+
+
+# =========================
+# PREMARKET DETECTION (C)
+# =========================
+
+def is_premarket():
+    est = pytz.timezone("US/Eastern")
+    now = datetime.now(est).time()
+    return time(4, 0) <= now < time(9, 30)
+
+
+# =========================
+# HEATMAP COLORING (B)
+# =========================
+
+def color_heatmap(val):
+    if val is None:
+        return ""
+    if isinstance(val, (int, float)):
+        if val >= 5:
+            return "background-color: #00b300; color: white;"
+        elif val >= 2:
+            return "background-color: #66ff66;"
+        elif val <= -5:
+            return "background-color: #ff4d4d; color: white;"
+        elif val <= -2:
+            return "background-color: #ff9999;"
+    return ""
+
+
+# =========================
+# SCAN LOGIC (D)
 # =========================
 
 def process_ticker(t):
-    """Process a single ticker (runs in a thread)."""
     price, prev_close, volume = fetch_alpaca_realtime(t)
     if price is None or prev_close is None or volume is None:
         return None
@@ -179,6 +223,11 @@ def process_ticker(t):
     momentum = compute_momentum(gap_pct, rvol)
 
     has_catalyst, catalyst_title = check_catalyst_newsapi(t)
+
+    vwap = fetch_vwap(t)
+    vwap_dev = ((price - vwap) / vwap * 100) if vwap else None
+
+    atr = fetch_atr(t)
 
     return {
         "Ticker": t,
@@ -192,13 +241,14 @@ def process_ticker(t):
         "Float": float_shares,
         "Has Catalyst": has_catalyst,
         "Catalyst Headline": catalyst_title,
+        "VWAP": vwap,
+        "VWAP Dev %": vwap_dev,
+        "ATR": atr,
     }
 
 
 def scan_universe(tickers):
-    """Multi-threaded scanning for speed."""
     rows = []
-
     if not tickers:
         return pd.DataFrame()
 
@@ -206,7 +256,6 @@ def scan_universe(tickers):
 
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
         futures = {executor.submit(process_ticker, t): t for t in tickers}
-
         for future in as_completed(futures):
             result = future.result()
             if result:
@@ -217,13 +266,9 @@ def scan_universe(tickers):
 
     df = pd.DataFrame(rows)
 
-    # Clean formatting
-    if "Gap %" in df.columns:
-        df["Gap %"] = df["Gap %"].round(2)
-    if "RVOL" in df.columns:
-        df["RVOL"] = df["RVOL"].round(2)
-    if "Momentum" in df.columns:
-        df["Momentum"] = df["Momentum"].round(2)
+    for col in ["Gap %", "RVOL", "Momentum", "VWAP Dev %", "ATR"]:
+        if col in df.columns:
+            df[col] = df[col].round(2)
 
     return df
 
@@ -236,61 +281,62 @@ def main():
     st.set_page_config(page_title="Alpaca + Catalyst Scanner", layout="wide")
     st.title("Alpaca Real‑Time + Catalyst Scanner")
 
-    st.markdown(
-        "Real‑time price/volume from **Alpaca**, float/avg volume from **Yahoo**, "
-        "and catalyst detection via **NewsAPI**."
-    )
+    if is_premarket():
+        st.info("📈 Premarket Session Detected (4:00–9:30 AM EST)")
+    else:
+        st.info("🕒 Regular Market Session")
 
     st.sidebar.header("Scan Settings")
 
     min_gap = st.sidebar.number_input("Min Gap %", value=3.0, step=0.5)
     min_rvol = st.sidebar.number_input("Min RVOL", value=1.5, step=0.1)
+    min_atr = st.sidebar.number_input("Min ATR", value=0.5, step=0.1)
     require_catalyst = st.sidebar.checkbox("Require Catalyst", value=False)
+
+    top_mode = st.sidebar.selectbox(
+        "Top Gappers Mode",
+        ["Full Universe", "Top 10", "Top 20", "Top 50"]
+    )
 
     st.sidebar.write("---")
     st.sidebar.write(f"Universe size: {len(UNIVERSE)} tickers")
 
     if st.button("Run Scan"):
-        with st.spinner("Scanning universe with Alpaca + NewsAPI..."):
+        with st.spinner("Scanning universe..."):
             df = scan_universe(UNIVERSE)
 
         if df.empty:
-            st.warning("No data returned. Check keys, market hours, or universe.")
+            st.warning("No data returned.")
             return
 
-        # Apply filters
-        if "Gap %" in df.columns:
-            df = df[df["Gap %"].notna() & (df["Gap %"] >= min_gap)]
-        if "RVOL" in df.columns:
-            df = df[df["RVOL"].notna() & (df["RVOL"] >= min_rvol)]
-        if require_catalyst and "Has Catalyst" in df.columns:
+        df = df[df["Gap %"].notna() & (df["Gap %"] >= min_gap)]
+        df = df[df["RVOL"].notna() & (df["RVOL"] >= min_rvol)]
+        df = df[df["ATR"].notna() & (df["ATR"] >= min_atr)]
+
+        if require_catalyst:
             df = df[df["Has Catalyst"] == True]
 
         if df.empty:
             st.warning("No tickers matched your filters.")
             return
 
-        # Sort by Momentum (A)
-        if "Momentum" in df.columns:
-            df = df.sort_values(by="Momentum", ascending=False)
-        else:
-            df = df.sort_values(by="Gap %", ascending=False)
+        df = df.sort_values(by="Momentum", ascending=False)
+
+        if top_mode == "Top 10":
+            df = df.head(10)
+        elif top_mode == "Top 20":
+            df = df.head(20)
+        elif top_mode == "Top 50":
+            df = df.head(50)
 
         st.subheader("Scan Results")
-        cols = [
-            "Ticker",
-            "Price",
-            "Gap %",
-            "RVOL",
-            "Momentum",
-            "Volume",
-            "Float",
-            "Has Catalyst",
-            "Catalyst Headline",
-        ]
-        cols = [c for c in cols if c in df.columns]
 
-        st.dataframe(df[cols], use_container_width=True)
+        styled = df.style.applymap(
+            color_heatmap,
+            subset=["Gap %", "RVOL", "Momentum"]
+        )
+
+        st.dataframe(styled, use_container_width=True)
         st.success(f"Found {len(df)} matching tickers.")
 
     else:
