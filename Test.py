@@ -19,7 +19,7 @@ from alpaca.data.timeframe import TimeFrame
 
 ALPACA_API_KEY = "PKROA6C3OVWVE4ACLS7ZTSFZ2K"
 ALPACA_SECRET_KEY = "CiMJpbtkkSedarodE3jsjyymAmpYPnh7UcZH2mnE8Y2j"
-NEWSAPI_KEY = "YOUR_NEWSAPI_KEY"
+NEWSAPI_KEY = "08d9db0ed13a4bddb15a589db72a501b"
 
 alpaca = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
