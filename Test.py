@@ -17,24 +17,41 @@ from alpaca.data.timeframe import TimeFrame
 # CONFIG: INSERT YOUR KEYS
 # =========================
 
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "YOUR_ALPACA_API_KEY")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "YOUR_ALPACA_SECRET_KEY")
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "YOUR_NEWSAPI_KEY")
+ALPACA_API_KEY = "YOUR_ALPACA_API_KEY"
+ALPACA_SECRET_KEY = "YOUR_ALPACA_SECRET_KEY"
+NEWSAPI_KEY = "YOUR_NEWSAPI_KEY"
 
 alpaca = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
-# Simple universe for demo – replace with your tickers.txt loader
-UNIVERSE = [
-    "AAPL", "TSLA", "NVDA", "AMD", "META", "MSFT", "AMZN", "NFLX",
-    "BABA", "SHOP", "PLTR", "ROKU", "SQ", "COIN", "CRWD", "PANW",
-]
+# =========================
+# LOAD TICKERS.TXT UNIVERSE
+# =========================
 
+def load_universe_from_file(path="tickers.txt"):
+    tickers = []
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
 
-CATALYST_KEYWORDS = [
-    "earnings", "guidance", "upgrade", "downgrade", "beats", "misses",
-    "FDA", "approval", "trial", "phase", "contract", "partnership",
-    "acquisition", "merger", "record", "revenue", "outlook",
-]
+                # Skip empty lines
+                if not line:
+                    continue
+
+                # Skip header lines (anything starting with #)
+                if line.startswith("#"):
+                    continue
+
+                # Add ticker (uppercase, clean)
+                tickers.append(line.upper())
+
+    except FileNotFoundError:
+        print("tickers.txt not found. Using empty universe.")
+        return []
+
+    return tickers
+
+UNIVERSE = load_universe_from_file()
 
 
 # =========================
@@ -99,9 +116,15 @@ def compute_gap_pct(price, prev_close):
 # CATALYST DETECTION
 # =========================
 
+CATALYST_KEYWORDS = [
+    "earnings", "guidance", "upgrade", "downgrade", "beats", "misses",
+    "FDA", "approval", "trial", "phase", "contract", "partnership",
+    "acquisition", "merger", "record", "revenue", "outlook",
+]
+
 def check_catalyst_newsapi(ticker: str):
     """
-    Very simple catalyst detector using NewsAPI headlines.
+    Simple catalyst detector using NewsAPI headlines.
     Returns (has_catalyst: bool, first_match_title: str or None)
     """
     if not NEWSAPI_KEY or NEWSAPI_KEY == "YOUR_NEWSAPI_KEY":
