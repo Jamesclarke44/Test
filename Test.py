@@ -268,7 +268,7 @@ def scan_universe(tickers):
 
     for col in ["Gap %", "RVOL", "Momentum", "VWAP Dev %", "ATR"]:
         if col in df.columns:
-            df[col] = df[col].round(2)
+            df[col] = pd.to_numeric(df[col], errors="coerce").round(2)
 
     return df
 
