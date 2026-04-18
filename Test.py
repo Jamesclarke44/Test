@@ -1,8 +1,6 @@
 import os
 import math
-import requests
 import pandas as pd
-import yfinance as yf
 import streamlit as st
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,13 +32,11 @@ def load_universe_from_file(path="tickers.txt"):
         with open(path, "r") as f:
             for line in f:
                 line = line.strip()
-                if not line:
-                    continue
-                if line.startswith("#"):
+                if not line or line.startswith("#"):
                     continue
                 tickers.append(line.upper())
     except FileNotFoundError:
-        print("tickers.txt not found. Using empty universe.")
+        print("tickers.txt not found.")
         return []
     return tickers
 
@@ -65,13 +61,11 @@ def fetch_alpaca_realtime(ticker: str):
         volume = int(bar.volume)
 
         return price, prev_close, volume
-    except Exception:
-        return None, None, None
 
-def compute_rvol(volume, avg_vol_10d):
-    if not volume or not avg_vol_10d or avg_vol_10d == 0:
-        return None
-    return volume / avg_vol_10d
+    except Exception as e:
+        # Debug (optional)
+        # print(f"{ticker} failed: {e}")
+        return None, None, None
 
 def compute_gap_pct(price, prev_close):
     if not price or not prev_close or prev_close == 0:
@@ -79,16 +73,16 @@ def compute_gap_pct(price, prev_close):
     return (price - prev_close) / prev_close * 100.0
 
 # =========================
-# MOMENTUM SCORE (A)
+# MOMENTUM (FIXED)
 # =========================
 
-def compute_momentum(gap_pct, rvol):
-    if gap_pct is None or rvol is None:
+def compute_momentum(gap_pct, volume):
+    if gap_pct is None or volume is None or volume <= 0:
         return None
-    return (gap_pct * 1.0) + (rvol * 2.0)
+    return gap_pct * math.log(volume + 1)
 
 # =========================
-# PREMARKET DETECTION (C)
+# PREMARKET DETECTION
 # =========================
 
 def is_premarket():
@@ -97,41 +91,37 @@ def is_premarket():
     return time(4, 0) <= now < time(9, 30)
 
 # =========================
-# HEATMAP COLORING (B)
+# HEATMAP COLORING
 # =========================
 
 def color_heatmap(val):
     if val is None:
         return ""
     if isinstance(val, (int, float)):
-        if val >= 5:
+        if val >= 20:
+            return "background-color: #006400; color: white;"
+        elif val >= 10:
             return "background-color: #00b300; color: white;"
-        elif val >= 2:
+        elif val >= 5:
             return "background-color: #66ff66;"
+        elif val <= -10:
+            return "background-color: #8b0000; color: white;"
         elif val <= -5:
-            return "background-color: #ff4d4d; color: white;"
-        elif val <= -2:
-            return "background-color: #ff9999;"
+            return "background-color: #ff4d4d;"
     return ""
 
 # =========================
-# SCAN LOGIC (D)
+# PROCESS TICKER
 # =========================
 
 def process_ticker(t):
     price, prev_close, volume = fetch_alpaca_realtime(t)
+
     if price is None or prev_close is None or volume is None:
         return None
 
-    # FAST MODE: No ATR, No NewsAPI, No Yahoo fundamentals
-    avg_vol_10d = None  # remove slow Yahoo call
-    rvol = None
-
-    # RVOL requires avg_vol_10d; skip for speed
-    # If you want RVOL back later, we re-enable Yahoo
-
     gap_pct = compute_gap_pct(price, prev_close)
-    momentum = compute_momentum(gap_pct, 0)  # RVOL removed for speed
+    momentum = compute_momentum(gap_pct, volume)
 
     return {
         "Ticker": t,
@@ -142,15 +132,20 @@ def process_ticker(t):
         "Volume": volume,
     }
 
+# =========================
+# SCAN LOGIC
+# =========================
+
 def scan_universe(tickers):
     rows = []
     if not tickers:
         return pd.DataFrame()
 
-    max_threads = min(40, len(tickers))
+    max_threads = min(15, len(tickers))  # safer for API
 
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
         futures = {executor.submit(process_ticker, t): t for t in tickers}
+
         for future in as_completed(futures):
             result = future.result()
             if result:
@@ -173,16 +168,17 @@ def scan_universe(tickers):
 
 def main():
     st.set_page_config(page_title="FAST Alpaca Scanner", layout="wide")
-    st.title("FAST Alpaca Real‑Time Scanner")
+    st.title("⚡ FAST Alpaca Real-Time Scanner")
 
     if is_premarket():
-        st.info("📈 Premarket Session Detected (4:00–9:30 AM EST)")
+        st.info("📈 Premarket Session (4:00–9:30 AM EST)")
     else:
         st.info("🕒 Regular Market Session")
 
     st.sidebar.header("Scan Settings")
 
     min_gap = st.sidebar.number_input("Min Gap %", value=3.0, step=0.5)
+    min_volume = st.sidebar.number_input("Min Volume", value=500000, step=100000)
 
     top_mode = st.sidebar.selectbox(
         "Top Gappers Mode",
@@ -200,11 +196,22 @@ def main():
             st.warning("No data returned.")
             return
 
-        df = df[df["Gap %"].notna() & (df["Gap %"] >= min_gap)]
+        # FILTERS (IMPROVED)
+        df = df[
+            (df["Gap %"].notna()) &
+            (df["Gap %"] >= min_gap) &
+            (df["Volume"] >= min_volume)
+        ]
 
         if df.empty:
             st.warning("No tickers matched your filters.")
             return
+
+        # TRADE READY FLAG
+        df["Trade Ready"] = (
+            (df["Gap %"] > 5) &
+            (df["Volume"] > 1_000_000)
+        )
 
         df = df.sort_values(by="Momentum", ascending=False)
 
@@ -226,7 +233,7 @@ def main():
         st.success(f"Found {len(df)} matching tickers.")
 
     else:
-        st.info("Set your filters, then click **Run Scan**.")
+        st.info("Set filters and click Run Scan")
 
 if __name__ == "__main__":
     main()
