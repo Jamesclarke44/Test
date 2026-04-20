@@ -17,8 +17,8 @@ from alpaca.data.requests import (
 # CONFIG
 # =========================
 
-ALPACA_API_KEY = ""
-ALPACA_SECRET_KEY = ""
+ALPACA_API_KEY = "PKROA6C3OVWVE4ACLS7ZTSFZ2K"
+ALPACA_SECRET_KEY = "CiMJpbtkkSedarodE3jsjyymAmpYPnh7UcZH2mnE8Y2j"
 
 alpaca = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
