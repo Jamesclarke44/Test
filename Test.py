@@ -1,4 +1,3 @@
-import os
 import math
 import pandas as pd
 import streamlit as st
@@ -18,8 +17,8 @@ from alpaca.data.requests import (
 # CONFIG
 # =========================
 
-ALPACA_API_KEY = "PKROA6C3OVWVE4ACLS7ZTSFZ2K"
-ALPACA_SECRET_KEY = "CiMJpbtkkSedarodE3jsjyymAmpYPnh7UcZH2mnE8Y2j"
+ALPACA_API_KEY = ""
+ALPACA_SECRET_KEY = ""
 
 alpaca = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
@@ -28,17 +27,15 @@ alpaca = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 # =========================
 
 def load_universe_from_file(path="tickers.txt"):
-    tickers = []
     try:
         with open(path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                tickers.append(line.upper())
+            return [
+                line.strip().upper()
+                for line in f
+                if line.strip() and not line.startswith("#")
+            ]
     except FileNotFoundError:
         return []
-    return tickers
 
 UNIVERSE = load_universe_from_file()
 
@@ -56,19 +53,15 @@ def fetch_alpaca_realtime(ticker: str):
             StockLatestBarRequest(symbol_or_symbols=ticker)
         )[ticker]
 
-        price = float(trade.price)
-        prev_close = float(bar.close)
-        volume = int(bar.volume)
-
-        return price, prev_close, volume
+        return float(trade.price), float(bar.close), int(bar.volume)
 
     except Exception:
         return None, None, None
 
 def compute_gap_pct(price, prev_close):
-    if not price or not prev_close or prev_close == 0:
+    if not price or not prev_close:
         return None
-    return (price - prev_close) / prev_close * 100.0
+    return (price - prev_close) / prev_close * 100
 
 def compute_momentum(gap_pct, volume):
     if gap_pct is None or volume is None or volume <= 0:
@@ -81,42 +74,71 @@ def compute_momentum(gap_pct, volume):
 
 def classify_setup(row):
     if row["Gap %"] > 5 and row["Volume"] > 1_000_000:
-        return "A+ Momentum"
+        return "A+"
     elif row["Gap %"] > 3 and row["Volume"] > 700_000:
-        return "B Setup"
-    else:
-        return "C (Ignore)"
+        return "B"
+    return "C"
 
 def trade_signal(row):
-    if row["Setup"] == "A+ Momentum":
+    if row["Setup"] == "A+":
         return "Watch Breakout"
-    elif row["Setup"] == "B Setup":
-        return "Possible Continuation"
+    elif row["Setup"] == "B":
+        return "Continuation"
     return ""
 
+def breakout_logic(row):
+    price = row["Price"]
+    pm_high = price * 1.02  # placeholder
+    breakout = pm_high
+
+    if price >= breakout:
+        return pm_high, breakout, "BREAKOUT 🔥"
+    elif price >= breakout * 0.98:
+        return pm_high, breakout, "Near Breakout"
+    return pm_high, breakout, ""
+
 def risk_model(price):
-    stop = price * 0.97
-    target = price * 1.06
-    return stop, target
+    return price * 0.97, price * 1.06
 
 # =========================
-# PROCESS TICKER
+# MARKET SESSION FIX (KEY)
+# =========================
+
+def get_market_session():
+    est = pytz.timezone("US/Eastern")
+    now = datetime.now(est)
+    current_time = now.time()
+    current_day = now.weekday()
+
+    if current_day >= 5:
+        return "Closed"
+
+    if dt_time(4, 0) <= current_time < dt_time(9, 30):
+        return "Premarket"
+    elif dt_time(9, 30) <= current_time < dt_time(16, 0):
+        return "Open"
+    elif dt_time(16, 0) <= current_time < dt_time(20, 0):
+        return "After Hours"
+    return "Closed"
+
+# =========================
+# PROCESS
 # =========================
 
 def process_ticker(t):
     price, prev_close, volume = fetch_alpaca_realtime(t)
 
-    if price is None or prev_close is None or volume is None:
+    if price is None:
         return None
 
-    gap_pct = compute_gap_pct(price, prev_close)
-    momentum = compute_momentum(gap_pct, volume)
+    gap = compute_gap_pct(price, prev_close)
+    momentum = compute_momentum(gap, volume)
 
     return {
         "Ticker": t,
         "Price": price,
-        "Gap %": gap_pct,
-        "Momentum": momentum,
+        "Gap %": round(gap, 2) if gap else None,
+        "Momentum": round(momentum, 2) if momentum else None,
         "Volume": volume,
     }
 
@@ -126,65 +148,51 @@ def process_ticker(t):
 
 def scan_universe(tickers):
     rows = []
-    if not tickers:
-        return pd.DataFrame()
+    with ThreadPoolExecutor(max_workers=min(15, len(tickers))) as executor:
+        futures = [executor.submit(process_ticker, t) for t in tickers]
+        for f in as_completed(futures):
+            r = f.result()
+            if r:
+                rows.append(r)
 
-    max_threads = min(15, len(tickers))
-
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        futures = {executor.submit(process_ticker, t): t for t in tickers}
-
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                rows.append(result)
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows)
-
-    df["Gap %"] = pd.to_numeric(df["Gap %"], errors="coerce").round(2)
-    df["Momentum"] = pd.to_numeric(df["Momentum"], errors="coerce").round(2)
-
-    return df
+    return pd.DataFrame(rows)
 
 # =========================
 # UI
 # =========================
 
-def is_premarket():
-    est = pytz.timezone("US/Eastern")
-    now = datetime.now(est).time()
-    return dt_time(4, 0) <= now < dt_time(9, 30)
-
 def main():
-    st.set_page_config(page_title="Trading System", layout="wide")
+    st.set_page_config(layout="wide")
     st.title("🚀 Momentum Trading System")
 
+    # SESSION STATE
     if "df" not in st.session_state:
         st.session_state.df = None
     if "last_scan" not in st.session_state:
         st.session_state.last_scan = None
 
-    if is_premarket():
-        st.info("📈 Premarket Session")
+    # MARKET STATUS
+    session = get_market_session()
+
+    if session == "Premarket":
+        st.info("📈 Premarket")
+    elif session == "Open":
+        st.success("🟢 Market Open")
+    elif session == "After Hours":
+        st.warning("🌙 After Hours")
     else:
-        st.info("🕒 Market Open")
+        st.error("🔴 Market Closed")
 
     # SIDEBAR
-    st.sidebar.header("Settings")
+    min_gap = st.sidebar.number_input("Min Gap %", 0.0, 20.0, 3.0)
+    min_volume = st.sidebar.number_input("Min Volume", 0, 5000000, 500000)
 
-    min_gap = st.sidebar.number_input("Min Gap %", value=3.0)
-    min_volume = st.sidebar.number_input("Min Volume", value=500000)
-
-    auto_refresh = st.sidebar.checkbox("Auto Refresh")
-    refresh_time = st.sidebar.slider("Refresh Seconds", 10, 120, 30)
+    auto = st.sidebar.checkbox("Auto Refresh")
+    refresh = st.sidebar.slider("Seconds", 10, 120, 30)
 
     # SCAN FUNCTION
     def run_scan():
         df = scan_universe(UNIVERSE)
-
         if df.empty:
             return None
 
@@ -196,48 +204,53 @@ def main():
         if df.empty:
             return None
 
-        # ADD SYSTEM LOGIC
         df["Setup"] = df.apply(classify_setup, axis=1)
         df["Signal"] = df.apply(trade_signal, axis=1)
 
-        df[["Stop", "Target"]] = df.apply(
-            lambda row: pd.Series(risk_model(row["Price"])),
-            axis=1
+        df[["PM High", "Breakout", "Entry"]] = df.apply(
+            lambda r: pd.Series(breakout_logic(r)), axis=1
         )
 
-        df = df.sort_values(by="Momentum", ascending=False)
+        df[["Stop", "Target"]] = df.apply(
+            lambda r: pd.Series(risk_model(r["Price"])), axis=1
+        )
 
-        # ONLY A+ TRADES
-        df = df[df["Setup"] == "A+ Momentum"]
+        df = df.sort_values("Momentum", ascending=False)
+
+        # Only A+ trades
+        df = df[df["Setup"] == "A+"]
 
         return df
 
-    # MANUAL RUN
+    # BUTTON
     if st.button("Run Scan"):
-        with st.spinner("Scanning..."):
-            st.session_state.df = run_scan()
-            st.session_state.last_scan = datetime.now()
+        st.session_state.df = run_scan()
+        st.session_state.last_scan = datetime.now()
 
-    # AUTO REFRESH
-    if auto_refresh:
-        time.sleep(refresh_time)
+    # AUTO
+    if auto:
+        time.sleep(refresh)
         st.session_state.df = run_scan()
         st.session_state.last_scan = datetime.now()
         st.rerun()
 
     # DISPLAY
     if st.session_state.df is not None:
-        st.subheader("Trade Opportunities")
+        st.subheader("🔥 Trade Opportunities")
 
         if st.session_state.last_scan:
-            st.caption(f"Last scan: {st.session_state.last_scan.strftime('%H:%M:%S')}")
+            st.caption(
+                f"Last scan: {st.session_state.last_scan.strftime('%H:%M:%S')}"
+            )
 
         st.dataframe(st.session_state.df, use_container_width=True)
 
         st.success(f"{len(st.session_state.df)} A+ setups found")
 
     else:
-        st.info("Run scan to find trades")
+        st.info("Run scan to begin")
+
+# =========================
 
 if __name__ == "__main__":
     main()
