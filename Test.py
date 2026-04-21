@@ -2,52 +2,98 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 
 st.set_page_config(page_title="Options Strategy Engine", layout="wide")
 st.title("Options Strategy Engine – Semi‑Automated (Level 1)")
 
 # ============================================================
-# ===============  DATA FETCH & INDICATOR ENGINE  ============
+# ===============  TRADINGVIEW INDICATOR ENGINE  =============
+# ============================================================
+
+def rsi_tv(series, length=14):
+    delta = series.diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+
+    avg_gain = pd.Series(gain).ewm(alpha=1/length, adjust=False).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/length, adjust=False).mean()
+
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def atr_tv(df, length=14):
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1/length, adjust=False).mean()
+    return atr
+
+def adx_tv(df, length=14):
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+
+    plus_dm = high.diff()
+    minus_dm = low.diff() * -1
+
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+
+    tr = pd.concat([
+        (high - low),
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs()
+    ], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1/length, adjust=False).mean()
+
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/length, adjust=False).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/length, adjust=False).mean() / atr)
+
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.ewm(alpha=1/length, adjust=False).mean()
+
+    return adx
+
+def bb_tv(series, length=20, std=2):
+    sma = series.rolling(length).mean()
+    dev = series.rolling(length).std()
+    upper = sma + std * dev
+    lower = sma - std * dev
+    return lower, upper
+
+def vwap_tv(df):
+    tp = (df["High"] + df["Low"] + df["Close"]) / 3
+    return (tp * df["Volume"]).cumsum() / df["Volume"].cumsum()
+
+# ============================================================
+# ===============  FETCH METRICS USING TV FORMULAS ===========
 # ============================================================
 
 def fetch_metrics(ticker: str):
     try:
-        data = yf.download(ticker, period="6mo", interval="1d", progress=False)
-        if data.empty:
+        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        if df.empty:
             return None, "No data returned for this ticker."
 
-        df = data.copy()
-
-        # Price
         price = float(df["Close"].iloc[-1])
+        rsi = float(rsi_tv(df["Close"]).iloc[-1])
+        atr = float(atr_tv(df).iloc[-1])
+        adx = float(adx_tv(df).iloc[-1])
+        bbl, bbh = bb_tv(df["Close"])
+        bbl = float(bbl.iloc[-1])
+        bbh = float(bbh.iloc[-1])
+        vwap = float(vwap_tv(df).iloc[-1])
 
-        # ATR(14)
-        atr_series = ta.atr(high=df["High"], low=df["Low"], close=df["Close"], length=14)
-        atr = float(atr_series.iloc[-1])
-
-        # RSI(14)
-        rsi_series = ta.rsi(df["Close"], length=14)
-        rsi = float(rsi_series.iloc[-1])
-
-        # ADX(14)
-        adx_series = ta.adx(high=df["High"], low=df["Low"], close=df["Close"], length=14)["ADX_14"]
-        adx = float(adx_series.iloc[-1])
-
-        # Bollinger Bands (20, 2)
-        bb = ta.bbands(df["Close"], length=20, std=2)
-        bbl = float(bb["BBL_20_2.0"].iloc[-1])
-        bbh = float(bb["BBU_20_2.0"].iloc[-1])
-
-        # Approx VWAP (daily)
-        tp = (df["High"] + df["Low"] + df["Close"]) / 3
-        vwap = float((tp * df["Volume"]).cumsum() / df["Volume"].cumsum()).iloc[-1]
-
-        # BB position
-        if bbh != bbl:
-            bb_pos = (price - bbl) / (bbh - bbl)
-        else:
-            bb_pos = 0.5
+        bb_pos = (price - bbl) / (bbh - bbl) if bbh != bbl else 0.5
 
         metrics = {
             "price": price,
@@ -60,6 +106,7 @@ def fetch_metrics(ticker: str):
             "bb_pos": bb_pos,
         }
         return metrics, None
+
     except Exception as e:
         return None, str(e)
 # ============================================================
