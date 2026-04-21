@@ -1,358 +1,423 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
+import json
+import os
+import math
+import numpy as np
+from datetime import datetime, timedelta
 
-# ------------------------------------------------------------
-# Streamlit page config
-# ------------------------------------------------------------
-st.set_page_config(page_title="Options Strategy Engine – Finance Version", layout="wide")
-st.title("Options Strategy Engine – Finance (yfinance)")
+from ta.trend import ADXIndicator
+from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volume import VolumeWeightedAveragePrice
 
-# ============================================================
-# ===============  TRADINGVIEW INDICATOR ENGINE  =============
-# ============================================================
+st.set_page_config(page_title="Options Engine V6 Stable", layout="centered")
 
-def rsi_tv(series, length=14):
-    delta = series.diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+TRADES_FILE = "trades.json"
 
-    avg_gain = pd.Series(gain).ewm(alpha=1/length, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/length, adjust=False).mean()
+# ----------------- GLOBAL SAFETY SWITCH -----------------
+# Set to True if you want to actually hit Yahoo options endpoints.
+# Default False to avoid YFRateLimitError and keep the app stable.
+ENABLE_OPTIONS = False
 
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+# ----------------- SAFE STORAGE -----------------
 
-def atr_tv(df, length=14):
-    high = df["High"]
-    low = df["Low"]
-    close = df["Close"]
-
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        (high - low),
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1).max(axis=1)
-
-    atr = tr.ewm(alpha=1/length, adjust=False).mean()
-    return atr
-
-def adx_tv(df, length=14):
-    high = df["High"]
-    low = df["Low"]
-    close = df["Close"]
-
-    plus_dm = high.diff()
-    minus_dm = low.diff() * -1
-
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-
-    tr = pd.concat([
-        (high - low),
-        (high - close.shift(1)).abs(),
-        (low - close.shift(1)).abs()
-    ], axis=1).max(axis=1)
-
-    atr = tr.ewm(alpha=1/length, adjust=False).mean()
-
-    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/length, adjust=False).mean() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/length, adjust=False).mean() / atr)
-
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.ewm(alpha=1/length, adjust=False).mean()
-
-    return adx
-
-def bb_tv(series, length=20, std=2):
-    sma = series.rolling(length).mean()
-    dev = series.rolling(length).std()
-    upper = sma + std * dev
-    lower = sma - std * dev
-    return lower, upper
-
-def vwap_tv(df):
-    tp = (df["High"] + df["Low"] + df["Close"]) / 3
-    return (tp * df["Volume"]).cumsum() / df["Volume"].cumsum()
-
-# ============================================================
-# ===============  FETCH METRICS USING YFINANCE  =============
-# ============================================================
-
-def fetch_metrics_yf(ticker: str):
+def load_trades():
+    if not os.path.exists(TRADES_FILE):
+        return []
     try:
-        df = yf.download(ticker, period="6mo", interval="1d")
-        if df.empty:
-            return None, "No data returned from yfinance."
+        with open(TRADES_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return []
 
-        price = float(df["Close"].iloc[-1])
-        rsi = float(rsi_tv(df["Close"]).iloc[-1])
-        atr = float(atr_tv(df).iloc[-1])
-        adx = float(adx_tv(df).iloc[-1])
-        bbl, bbh = bb_tv(df["Close"])
-        bbl = float(bbl.iloc[-1])
-        bbh = float(bbh.iloc[-1])
-        vwap = float(vwap_tv(df).iloc[-1])
+def save_trades(trades):
+    with open(TRADES_FILE, "w") as f:
+        json.dump(trades, f, indent=2)
 
-        bb_pos = (price - bbl) / (bbh - bbl) if bbh != bbl else 0.5
+def add_trade(trade):
+    trades = load_trades()
+    trades.append(trade)
+    save_trades(trades)
 
-        metrics = {
-            "price": price,
-            "rsi": rsi,
-            "adx": adx,
-            "atr": atr,
-            "vwap": vwap,
-            "bbh": bbh,
-            "bbl": bbl,
-            "bb_pos": bb_pos,
-        }
-        return metrics, None
+def remove_trade(index):
+    trades = load_trades()
+    if 0 <= index < len(trades):
+        trades.pop(index)
+        save_trades(trades)
 
-    except Exception as e:
-        return None, f"yfinance fetch error: {e}"
+# ----------------- DATA -----------------
 
-# ============================================================
-# ===============  STRATEGY CLASSIFIER (ENTRY)  ==============
-# ============================================================
+@st.cache_data(ttl=3600)
+def get_data(ticker):
+    return yf.download(ticker, period="6mo", interval="1d", progress=False)
 
-def classify_strategy(price, rsi, adx, ivr, vwap, bb_pos, atr):
-    if (45 <= rsi <= 55 and
-        adx < 20 and
-        30 <= ivr <= 60 and
-        0.30 <= bb_pos <= 0.70 and
-        abs(price - vwap) <= atr):
-        return "CALENDAR SPREAD", "Neutral: RSI 45–55, ADX < 20, IVR medium, price near VWAP."
+@st.cache_data
+def load_universe():
+    url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
+    df = pd.read_csv(url)
+    return df["Symbol"].tolist()
 
-    if (55 <= rsi <= 65 and
-        18 <= adx <= 25 and
-        ivr <= 35 and
-        price > vwap and
-        0.55 <= bb_pos <= 0.75):
-        return "BULL CALL DEBIT SPREAD", "Mild bullish: RSI 55–65, ADX 18–25, low IVR, price above VWAP."
+# ----------------- INDICATORS -----------------
 
-    if (35 <= rsi <= 45 and
-        18 <= adx <= 25 and
-        ivr <= 40 and
-        price < vwap and
-        0.25 <= bb_pos <= 0.45):
-        return "BEAR PUT DEBIT SPREAD", "Mild bearish: RSI 35–45, ADX 18–25, low IVR, price below VWAP."
+def compute_indicators(df):
+    df = df.copy()
 
-    if (50 <= rsi <= 60 and
-        15 <= adx <= 25 and
-        ivr <= 35 and
-        0.45 <= bb_pos <= 0.65):
-        return "DIAGONAL SPREAD", "Slight trend with low IV: RSI 50–60, ADX 15–25, low IVR."
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
-    return "NO TRADE", "Environment does not match any high‑probability setup."
+    df = df.dropna()
 
-# ============================================================
-# ==================  EXIT ENGINES  ==========================
-# ============================================================
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    volume = df["Volume"]
 
-def decide_bull_call_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
-    if pnl_pct <= -30:
-        return "EXIT: Stop loss hit (≤ -30%)"
-    if pnl_pct >= 25:
-        return "EXIT: Take profit (≥ +25%)"
-    if pnl_pct > 0:
-        if rsi > 65:
-            return "EXIT: Take profit early (RSI > 65)"
-        if adx > 25:
-            return "EXIT: Take profit early (ADX > 25)"
-        if price < vwap:
-            return "EXIT: Take profit early (price < VWAP)"
-        if bb_pos >= 0.9:
-            return "EXIT: Take profit early (near upper Bollinger Band)"
-    if (50 <= rsi <= 60 and
-        18 <= adx <= 23 and
-        price > vwap and
-        0.55 <= bb_pos <= 0.75):
-        return "HOLD: Ideal environment for bull call spread."
-    return "HOLD: No exit signal, but environment not ideal."
+    df["RSI"] = RSIIndicator(close=close).rsi()
+    df["ADX"] = ADXIndicator(high=high, low=low, close=close).adx()
+    df["ATR"] = AverageTrueRange(high=high, low=low, close=close).average_true_range()
 
-def decide_calendar_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
-    if pnl_pct <= -30:
-        return "EXIT: Stop loss hit (≤ -30%)"
-    if pnl_pct >= 25:
-        return "EXIT: Take profit (≥ +25%)"
-    if rsi > 60:
-        return "EXIT: RSI > 60 (trend forming)"
-    if rsi < 40:
-        return "EXIT: RSI < 40 (trend forming)"
-    if adx > 25:
-        return "EXIT: ADX > 25 (trend forming)"
-    if price > vwap + 2:
-        return "EXIT: Price breaking above VWAP"
-    if price < vwap - 2:
-        return "EXIT: Price breaking below VWAP"
-    if (45 <= rsi <= 55 and
-        adx < 20 and
-        0.30 <= bb_pos <= 0.70):
-        return "HOLD: Ideal neutral environment for calendar."
-    return "HOLD: No exit signal, but environment not ideal."
+    bb = BollingerBands(close=close)
+    df["BB_High"] = bb.bollinger_hband()
+    df["BB_Low"] = bb.bollinger_lband()
 
-# ============================================================
-# ==================  SIDEBAR: TICKER & FETCH  ===============
-# ============================================================
+    df["VWAP"] = VolumeWeightedAveragePrice(
+        high=high, low=low, close=close, volume=volume
+    ).volume_weighted_average_price()
 
-st.sidebar.header("Data Source – yfinance (delayed)")
-ticker = st.sidebar.text_input("Ticker", value="COST")
-auto_fetch = st.sidebar.button("Fetch latest metrics")
+    df["BB_Width"] = (df["BB_High"] - df["BB_Low"]) / df["Close"]
 
-if "metrics" not in st.session_state:
-    st.session_state.metrics = None
-if "fetch_error" not in st.session_state:
-    st.session_state.fetch_error = None
+    df = compute_iv_proxy(df)
 
-if auto_fetch:
-    metrics, err = fetch_metrics_yf(ticker)
-    st.session_state.metrics = metrics
-    st.session_state.fetch_error = err
+    return df
 
-if st.session_state.fetch_error:
-    st.sidebar.error(f"Fetch error: {st.session_state.fetch_error}")
-elif st.session_state.metrics:
-    m = st.session_state.metrics
-    st.sidebar.success("Metrics fetched")
-    st.sidebar.write(
-        f"Price: {m['price']:.2f}\n\n"
-        f"RSI: {m['rsi']:.2f}\n\n"
-        f"ADX: {m['adx']:.2f}\n\n"
-        f"ATR: {m['atr']:.2f}\n\n"
-        f"VWAP: {m['vwap']:.2f}\n\n"
-        f"BBL: {m['bbl']:.2f}\n\n"
-        f"BBH: {m['bbh']:.2f}\n\n"
-        f"BB Pos: {m['bb_pos']:.2f}"
-    )
+# ----------------- IV ENGINE -----------------
 
-tabs = st.tabs(["Strategy Entry Engine", "Bull Call Exit Engine", "Calendar Exit Engine"])
+def compute_iv_proxy(df):
+    df["ATR_PCT"] = df["ATR"] / df["Close"] * 100
 
-# ============================================================
-# ==================  TAB 1: ENTRY ENGINE  ===================
-# ============================================================
+    iv_min = df["ATR_PCT"].rolling(100).min()
+    iv_max = df["ATR_PCT"].rolling(100).max()
 
-with tabs[0]:
-    st.header("Strategy Entry Engine")
+    df["IV_Rank"] = ((df["ATR_PCT"] - iv_min) / (iv_max - iv_min)) * 100
+    df["IV_Rank"] = df["IV_Rank"].fillna(50)
 
-    base = st.session_state.metrics or {
-        "price": 999.66,
-        "rsi": 56.36,
-        "adx": 20.60,
-        "atr": 5.78,
-        "vwap": 997.99,
-        "bbh": 1008.88,
-        "bbl": 980.90,
-        "bb_pos": 0.6,
+    return df
+
+def volatility_regime(iv_rank):
+    if iv_rank < 30:
+        return "LOW"
+    elif iv_rank > 70:
+        return "HIGH"
+    else:
+        return "NORMAL"
+
+def select_strategy(iv_rank, prob):
+    regime = volatility_regime(iv_rank)
+
+    if regime == "LOW" and prob >= 70:
+        return "Calendar"
+    elif regime == "HIGH" and prob >= 60:
+        return "Credit Spread"
+    elif regime == "NORMAL" and prob >= 75:
+        return "Calendar"
+    else:
+        return "No Trade"
+
+# ----------------- SCORING -----------------
+
+def score_setup(rsi, adx, atr_pct, vwap_drift, bb_width):
+    score = 0
+    if 40 <= rsi <= 60: score += 1
+    if adx < 20: score += 1
+    if atr_pct < 2.5: score += 1
+    if vwap_drift < 0.01: score += 1
+    if bb_width < 0.05: score += 2
+    return score
+
+def probability(score):
+    return int((score / 6) * 100)
+
+# ----------------- OPTIONS ENGINE -----------------
+
+def get_expirations(ticker):
+    # Hard safety: if options are disabled, never hit Yahoo options endpoint.
+    if not ENABLE_OPTIONS:
+        return []
+    try:
+        tk = yf.Ticker(ticker)
+        return tk.options or []
+    except Exception:
+        return []
+
+def get_chain(ticker, expiry):
+    if not ENABLE_OPTIONS:
+        return None, None
+    try:
+        tk = yf.Ticker(ticker)
+        chain = tk.option_chain(expiry)
+        return chain.calls, chain.puts
+    except Exception:
+        return None, None
+
+def find_atm(df, price):
+    df = df.copy()
+    df["dist"] = abs(df["strike"] - price)
+    return df.sort_values("dist").iloc[0]["strike"]
+
+def build_calendar(ticker, price):
+    exps = get_expirations(ticker)
+    if not exps or len(exps) < 2:
+        return None
+
+    front = exps[0]
+    back = exps[min(3, len(exps)-1)]
+
+    calls_f, _ = get_chain(ticker, front)
+    calls_b, _ = get_chain(ticker, back)
+
+    if calls_f is None or calls_f.empty:
+        return None
+
+    strike = find_atm(calls_f, price)
+
+    return {
+        "type": "Calendar Spread",
+        "strike": float(strike),
+        "front_exp": front,
+        "back_exp": back
     }
 
-    col1, col2 = st.columns(2)
-    with col1:
-        e_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1)
-        e_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1)
-        e_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1)
-        e_ivr = st.number_input("IVR (manual)", value=30.0, step=1.0)
-    with col2:
-        e_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1)
-        e_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1)
-        e_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1)
-        e_atr = st.number_input("ATR", value=float(base["atr"]), step=0.1)
+def build_credit_spread(ticker, price):
+    exps = get_expirations(ticker)
+    if not exps:
+        return None
 
-    if e_bbh != e_bbl:
-        e_bb_pos = (e_price - e_bbl) / (e_bbh - e_bbl)
-    else:
-        e_bb_pos = 0.5
+    expiry = exps[0]
 
-    st.markdown(f"**BB Position (0–1):** `{e_bb_pos:.2f}`")
+    calls, puts = get_chain(ticker, expiry)
+    if calls is None or calls.empty:
+        return None
 
-    if st.button("Classify Strategy"):
-        strat, reason = classify_strategy(e_price, e_rsi, e_adx, e_ivr, e_vwap, e_bb_pos, e_atr)
-        st.subheader("Recommended Strategy")
-        st.success(strat)
-        st.subheader("Reason")
-        st.write(reason)
+    calls = calls.sort_values("strike")
+    otm = calls[calls["strike"] > price]
 
-# ============================================================
-# ============  TAB 2: BULL CALL EXIT ENGINE  ================
-# ============================================================
+    if len(otm) < 2:
+        return None
 
-with tabs[1]:
-    st.header("Bull Call Debit Spread – Exit Engine")
+    short = otm.iloc[0]["strike"]
+    long = otm.iloc[1]["strike"]
 
-    base = st.session_state.metrics or {
-        "price": 999.66,
-        "rsi": 56.36,
-        "adx": 20.60,
-        "atr": 5.78,
-        "vwap": 997.99,
-        "bbh": 1008.88,
-        "bbl": 980.90,
-        "bb_pos": 0.6,
+    return {
+        "type": "Call Credit Spread",
+        "short_strike": float(short),
+        "long_strike": float(long),
+        "expiry": expiry
     }
 
-    col1, col2 = st.columns(2)
-    with col1:
-        bc_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1)
-        bc_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1)
-        bc_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1)
-        bc_ivr = st.number_input("IVR (manual)", value=23.0, step=1.0)
-    with col2:
-        bc_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1)
-        bc_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1)
-        bc_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1)
-        bc_pnl = st.number_input("Current P/L % on Spread", value=16.0, step=1.0)
+def build_trade(row):
+    if row["Strategy"] == "Calendar":
+        return build_calendar(row["Ticker"], row["Price"])
+    elif row["Strategy"] == "Credit Spread":
+        return build_credit_spread(row["Ticker"], row["Price"])
+    return None
 
-    if bc_bbh != bc_bbl:
-        bc_bb_pos = (bc_price - bc_bbl) / (bc_bbh - bc_bbl)
+# ----------------- GREEKS -----------------
+
+def estimate_delta(price, strike, iv_rank):
+    m = (price - strike) / price
+    return round(np.tanh(m * 5) * (1 + iv_rank / 100), 2)
+
+def estimate_theta(dte, iv_rank):
+    if dte <= 0:
+        return -1
+    return round(-(1 / math.sqrt(dte)) * (1 + iv_rank / 100), 2)
+
+def estimate_vega(price, atr_pct, iv_rank):
+    return round((atr_pct * 0.5) * (iv_rank / 50), 2)
+
+# ----------------- SCAN -----------------
+
+def scan_universe(tickers):
+    results = []
+
+    for t in tickers[:50]:
+        try:
+            df = get_data(t)
+            if df.empty:
+                continue
+
+            df = compute_indicators(df)
+            last = df.iloc[-1]
+
+            price = last["Close"]
+            rsi = last["RSI"]
+            adx = last["ADX"]
+            atr = last["ATR"]
+            vwap = last["VWAP"]
+            bb_width = last["BB_Width"]
+            iv_rank = last["IV_Rank"]
+
+            atr_pct = (atr / price) * 100
+            vwap_drift = abs(price - vwap) / price
+
+            score = score_setup(rsi, adx, atr_pct, vwap_drift, bb_width)
+            prob = probability(score)
+
+            regime = volatility_regime(iv_rank)
+            strategy = select_strategy(iv_rank, prob)
+
+            if strategy != "No Trade":
+                results.append({
+                    "Ticker": t,
+                    "Price": round(price, 2),
+                    "Probability %": prob,
+                    "IV Rank": round(iv_rank, 1),
+                    "Regime": regime,
+                    "Strategy": strategy
+                })
+
+        except:
+            continue
+
+    return pd.DataFrame(results)
+
+# ----------------- SAFE REPORT (FIXED CRASH) -----------------
+
+def trade_report(trade):
+    df = get_data(trade["ticker"])
+    if df.empty:
+        return {}
+
+    df = compute_indicators(df)
+    last = df.iloc[-1]
+
+    price = last["Close"]
+    atr = last["ATR"]
+    iv_rank = last["IV_Rank"]
+
+    entry = trade.get("price_at_entry", price)
+    pnl = ((price - entry) / entry) * 100 if entry else 0
+
+    strike = trade.get("strike")
+    strike = float(strike) if strike is not None else price
+
+    expiry = trade.get("front_exp") or trade.get("expiry")
+
+    if expiry:
+        try:
+            dte = (datetime.strptime(expiry, "%Y-%m-%d").date()
+                   - datetime.today().date()).days
+        except:
+            dte = 0
     else:
-        bc_bb_pos = 0.5
+        dte = 0
 
-    st.markdown(f"**BB Position (0–1):** `{bc_bb_pos:.2f}`")
+    delta = estimate_delta(price, strike, iv_rank)
+    theta = estimate_theta(dte, iv_rank)
+    vega = estimate_vega(price, (atr / price) * 100, iv_rank)
 
-    if st.button("Evaluate Bull Call Exit"):
-        decision = decide_bull_call_exit(bc_price, bc_rsi, bc_adx, bc_ivr, bc_vwap, bc_bb_pos, bc_pnl)
-        st.subheader("Decision")
-        st.success(decision)
-
-# ============================================================
-# ============  TAB 3: CALENDAR EXIT ENGINE  =================
-# ============================================================
-
-with tabs[2]:
-    st.header("Calendar Spread – Exit Engine")
-
-    base = st.session_state.metrics or {
-        "price": 331.15,
-        "rsi": 53.91,
-        "adx": 20.0,
-        "atr": 4.0,
-        "vwap": 330.50,
-        "bbh": 334.50,
-        "bbl": 325.55,
-        "bb_pos": 0.5,
+    return {
+        "Price": round(price, 2),
+        "PnL %": round(pnl, 2),
+        "IV Rank": round(iv_rank, 1),
+        "Delta": delta,
+        "Theta": theta,
+        "Vega": vega,
+        "DTE": dte
     }
 
-    col1, col2 = st.columns(2)
-    with col1:
-        cal_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1)
-        cal_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1)
-        cal_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1)
-        cal_ivr = st.number_input("IVR (manual)", value=62.0, step=1.0)
-    with col2:
-        cal_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1)
-        cal_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1)
-        cal_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1)
-        cal_pnl = st.number_input("Current P/L % on Calendar", value=12.0, step=1.0)
+# ----------------- EXIT -----------------
 
-    if cal_bbh != cal_bbl:
-        cal_bb_pos = (cal_price - cal_bbl) / (cal_bbh - cal_bbl)
+def evaluate_exit(trade):
+    report = trade_report(trade)
+    if not report:
+        return "UNKNOWN"
+
+    score = 0
+    if report["DTE"] <= 3:
+        score += 2
+    if abs(report["Delta"]) > 0.85:
+        score += 2
+
+    if score >= 3:
+        return "EXIT"
+    elif score == 2:
+        return "WATCH"
     else:
-        cal_bb_pos = 0.5
+        return "HOLD"
 
-    st.markdown(f"**BB Position (0–1):** `{cal_bb_pos:.2f}`")
+# ----------------- UI -----------------
 
-    if st.button("Evaluate Calendar Exit"):
-        decision = decide_calendar_exit(cal_price, cal_rsi, cal_adx, cal_ivr, cal_vwap, cal_bb_pos, cal_pnl)
-        st.subheader("Decision")
-        st.success(decision)
+st.title("🧠 Options Engine V6 Stable")
+
+tab1, tab2, tab3 = st.tabs(["Scan", "Trades", "Exit"])
+
+# ---------- SCAN ----------
+with tab1:
+
+    if st.button("Run Scan"):
+        df = scan_universe(load_universe())
+        st.session_state["scan"] = df
+
+    if "scan" in st.session_state:
+        df = st.session_state["scan"]
+
+        st.dataframe(df.sort_values("Probability %", ascending=False))
+
+        st.subheader("🔥 Build Trades")
+
+        for i, row in df.head(5).iterrows():
+
+            if st.button(f"Build {row['Ticker']}", key=f"b{i}"):
+
+                trade_plan = build_trade(row)
+
+                if trade_plan:
+                    st.success("Trade Built")
+
+                    for k, v in trade_plan.items():
+                        st.write(f"{k}: {v}")
+
+                    trade = {
+                        "ticker": row["Ticker"],
+                        "price_at_entry": row["Price"],
+                        **trade_plan
+                    }
+
+                    add_trade(trade)
+
+# ---------- TRADES ----------
+with tab2:
+
+    trades = load_trades()
+
+    if not trades:
+        st.info("No trades yet")
+    else:
+        for i, t in enumerate(trades):
+            st.markdown(f"## {t['ticker']}")
+
+            report = trade_report(t)
+            for k, v in report.items():
+                st.write(f"{k}: {v}")
+
+            if st.button("Remove", key=f"r{i}"):
+                remove_trade(i)
+                st.rerun()
+
+# ---------- EXIT ----------
+with tab3:
+
+    trades = load_trades()
+
+    for t in trades:
+        decision = evaluate_exit(t)
+
+        if decision == "EXIT":
+            st.error(f"{t['ticker']} → EXIT")
+        elif decision == "WATCH":
+            st.warning(f"{t['ticker']} → WATCH")
+        else:
+            st.success(f"{t['ticker']} → HOLD")
