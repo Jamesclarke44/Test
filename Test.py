@@ -39,7 +39,7 @@ def fetch_metrics(ticker: str):
         bbl = float(bb["BBL_20_2.0"].iloc[-1])
         bbh = float(bb["BBU_20_2.0"].iloc[-1])
 
-        # Approx VWAP (daily, using typical price)
+        # Approx VWAP (daily)
         tp = (df["High"] + df["Low"] + df["Close"]) / 3
         vwap = float((tp * df["Volume"]).cumsum() / df["Volume"].cumsum()).iloc[-1]
 
@@ -49,7 +49,6 @@ def fetch_metrics(ticker: str):
         else:
             bb_pos = 0.5
 
-        # IVR – leave manual for now
         metrics = {
             "price": price,
             "rsi": rsi,
@@ -63,7 +62,6 @@ def fetch_metrics(ticker: str):
         return metrics, None
     except Exception as e:
         return None, str(e)
-
 # ============================================================
 # ===============  STRATEGY CLASSIFIER (ENTRY)  ==============
 # ============================================================
@@ -120,8 +118,8 @@ def decide_bull_call_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
         18 <= adx <= 23 and
         price > vwap and
         0.55 <= bb_pos <= 0.75):
-        return "HOLD: Environment ideal for bull call spread – stay in the trade."
-    return "HOLD: No exit signal, but environment not ideal – monitor closely."
+        return "HOLD: Ideal environment for bull call spread."
+    return "HOLD: No exit signal, but environment not ideal."
 
 def decide_calendar_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
     if pnl_pct <= -30:
@@ -129,21 +127,20 @@ def decide_calendar_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
     if pnl_pct >= 25:
         return "EXIT: Take profit (≥ +25%)"
     if rsi > 60:
-        return "EXIT: RSI > 60 (momentum breaking neutrality)"
+        return "EXIT: RSI > 60 (trend forming)"
     if rsi < 40:
-        return "EXIT: RSI < 40 (momentum breaking neutrality)"
+        return "EXIT: RSI < 40 (trend forming)"
     if adx > 25:
-        return "EXIT: ADX > 25 (trend forming – bad for calendars)"
+        return "EXIT: ADX > 25 (trend forming)"
     if price > vwap + 2:
-        return "EXIT: Price breaking above VWAP (trend forming)"
+        return "EXIT: Price breaking above VWAP"
     if price < vwap - 2:
-        return "EXIT: Price breaking below VWAP (trend forming)"
+        return "EXIT: Price breaking below VWAP"
     if (45 <= rsi <= 55 and
         adx < 20 and
         0.30 <= bb_pos <= 0.70):
-        return "HOLD: Ideal neutral environment for calendar – stay in the trade."
-    return "HOLD: No exit signal, but environment not ideal – monitor closely."
-
+        return "HOLD: Ideal neutral environment for calendar."
+    return "HOLD: No exit signal, but environment not ideal."
 # ============================================================
 # ==================  SIDEBAR: TICKER & FETCH  ===============
 # ============================================================
@@ -200,15 +197,15 @@ with tabs[0]:
 
     col1, col2 = st.columns(2)
     with col1:
-        e_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1, key="e_price")
-        e_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1, key="e_rsi")
-        e_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1, key="e_adx")
-        e_ivr = st.number_input("IVR (manual for now)", value=30.0, step=1.0, key="e_ivr")
+        e_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1)
+        e_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1)
+        e_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1)
+        e_ivr = st.number_input("IVR (manual)", value=30.0, step=1.0)
     with col2:
-        e_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1, key="e_vwap")
-        e_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1, key="e_bbh")
-        e_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1, key="e_bbl")
-        e_atr = st.number_input("ATR", value=float(base["atr"]), step=0.1, key="e_atr")
+        e_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1)
+        e_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1)
+        e_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1)
+        e_atr = st.number_input("ATR", value=float(base["atr"]), step=0.1)
 
     if e_bbh != e_bbl:
         e_bb_pos = (e_price - e_bbl) / (e_bbh - e_bbl)
@@ -217,7 +214,7 @@ with tabs[0]:
 
     st.markdown(f"**BB Position (0–1):** `{e_bb_pos:.2f}`")
 
-    if st.button("Classify Strategy", key="classify_btn"):
+    if st.button("Classify Strategy"):
         strat, reason = classify_strategy(e_price, e_rsi, e_adx, e_ivr, e_vwap, e_bb_pos, e_atr)
         st.subheader("Recommended Strategy")
         st.success(strat)
@@ -244,15 +241,15 @@ with tabs[1]:
 
     col1, col2 = st.columns(2)
     with col1:
-        bc_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1, key="bc_price")
-        bc_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1, key="bc_rsi")
-        bc_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1, key="bc_adx")
-        bc_ivr = st.number_input("IVR (manual)", value=23.0, step=1.0, key="bc_ivr")
+        bc_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1)
+        bc_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1)
+        bc_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1)
+        bc_ivr = st.number_input("IVR (manual)", value=23.0, step=1.0)
     with col2:
-        bc_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1, key="bc_vwap")
-        bc_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1, key="bc_bbh")
-        bc_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1, key="bc_bbl")
-        bc_pnl = st.number_input("Current P/L % on Spread", value=16.0, step=1.0, key="bc_pnl")
+        bc_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1)
+        bc_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1)
+        bc_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1)
+        bc_pnl = st.number_input("Current P/L % on Spread", value=16.0, step=1.0)
 
     if bc_bbh != bc_bbl:
         bc_bb_pos = (bc_price - bc_bbl) / (bc_bbh - bc_bbl)
@@ -261,7 +258,7 @@ with tabs[1]:
 
     st.markdown(f"**BB Position (0–1):** `{bc_bb_pos:.2f}`")
 
-    if st.button("Evaluate Bull Call Exit", key="bc_btn"):
+    if st.button("Evaluate Bull Call Exit"):
         decision = decide_bull_call_exit(bc_price, bc_rsi, bc_adx, bc_ivr, bc_vwap, bc_bb_pos, bc_pnl)
         st.subheader("Decision")
         st.success(decision)
@@ -286,15 +283,15 @@ with tabs[2]:
 
     col1, col2 = st.columns(2)
     with col1:
-        cal_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1, key="cal_price")
-        cal_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1, key="cal_rsi")
-        cal_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1, key="cal_adx")
-        cal_ivr = st.number_input("IVR (manual)", value=62.0, step=1.0, key="cal_ivr")
+        cal_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1)
+        cal_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1)
+        cal_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1)
+        cal_ivr = st.number_input("IVR (manual)", value=62.0, step=1.0)
     with col2:
-        cal_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1, key="cal_vwap")
-        cal_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1, key="cal_bbh")
-        cal_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1, key="cal_bbl")
-        cal_pnl = st.number_input("Current P/L % on Calendar", value=-5.0, step=1.0, key="cal_pnl")
+        cal_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1)
+        cal_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1)
+        cal_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1)
+        cal_pnl = st.number_input("Current P/L % on Calendar", value=-5.0, step=1.0)
 
     if cal_bbh != cal_bbl:
         cal_bb_pos = (cal_price - cal_bbl) / (cal_bbh - cal_bbl)
@@ -303,7 +300,7 @@ with tabs[2]:
 
     st.markdown(f"**BB Position (0–1):** `{cal_bb_pos:.2f}`")
 
-    if st.button("Evaluate Calendar Exit", key="cal_btn"):
+    if st.button("Evaluate Calendar Exit"):
         decision = decide_calendar_exit(cal_price, cal_rsi, cal_adx, cal_ivr, cal_vwap, cal_bb_pos, cal_pnl)
         st.subheader("Decision")
         st.success(decision)
