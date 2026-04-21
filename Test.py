@@ -1,16 +1,74 @@
 import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import pandas_ta as ta
 
 st.set_page_config(page_title="Options Strategy Engine", layout="wide")
-st.title("Options Strategy Engine")
-
-tabs = st.tabs(["Strategy Entry Engine", "Bull Call Exit Engine", "Calendar Exit Engine"])
+st.title("Options Strategy Engine – Semi‑Automated (Level 1)")
 
 # ============================================================
-# ===============  SHARED: STRATEGY CLASSIFIER  ==============
+# ===============  DATA FETCH & INDICATOR ENGINE  ============
+# ============================================================
+
+def fetch_metrics(ticker: str):
+    try:
+        data = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        if data.empty:
+            return None, "No data returned for this ticker."
+
+        df = data.copy()
+
+        # Price
+        price = float(df["Close"].iloc[-1])
+
+        # ATR(14)
+        atr_series = ta.atr(high=df["High"], low=df["Low"], close=df["Close"], length=14)
+        atr = float(atr_series.iloc[-1])
+
+        # RSI(14)
+        rsi_series = ta.rsi(df["Close"], length=14)
+        rsi = float(rsi_series.iloc[-1])
+
+        # ADX(14)
+        adx_series = ta.adx(high=df["High"], low=df["Low"], close=df["Close"], length=14)["ADX_14"]
+        adx = float(adx_series.iloc[-1])
+
+        # Bollinger Bands (20, 2)
+        bb = ta.bbands(df["Close"], length=20, std=2)
+        bbl = float(bb["BBL_20_2.0"].iloc[-1])
+        bbh = float(bb["BBU_20_2.0"].iloc[-1])
+
+        # Approx VWAP (daily, using typical price)
+        tp = (df["High"] + df["Low"] + df["Close"]) / 3
+        vwap = float((tp * df["Volume"]).cumsum() / df["Volume"].cumsum()).iloc[-1]
+
+        # BB position
+        if bbh != bbl:
+            bb_pos = (price - bbl) / (bbh - bbl)
+        else:
+            bb_pos = 0.5
+
+        # IVR – leave manual for now
+        metrics = {
+            "price": price,
+            "rsi": rsi,
+            "adx": adx,
+            "atr": atr,
+            "vwap": vwap,
+            "bbh": bbh,
+            "bbl": bbl,
+            "bb_pos": bb_pos,
+        }
+        return metrics, None
+    except Exception as e:
+        return None, str(e)
+
+# ============================================================
+# ===============  STRATEGY CLASSIFIER (ENTRY)  ==============
 # ============================================================
 
 def classify_strategy(price, rsi, adx, ivr, vwap, bb_pos, atr):
-    # 1. Calendar Spread
     if (45 <= rsi <= 55 and
         adx < 20 and
         30 <= ivr <= 60 and
@@ -18,7 +76,6 @@ def classify_strategy(price, rsi, adx, ivr, vwap, bb_pos, atr):
         abs(price - vwap) <= atr):
         return "CALENDAR SPREAD", "Neutral: RSI 45–55, ADX < 20, IVR medium, price near VWAP."
 
-    # 2. Bull Call Debit Spread
     if (55 <= rsi <= 65 and
         18 <= adx <= 25 and
         ivr <= 35 and
@@ -26,7 +83,6 @@ def classify_strategy(price, rsi, adx, ivr, vwap, bb_pos, atr):
         0.55 <= bb_pos <= 0.75):
         return "BULL CALL DEBIT SPREAD", "Mild bullish: RSI 55–65, ADX 18–25, low IVR, price above VWAP."
 
-    # 3. Bear Put Debit Spread
     if (35 <= rsi <= 45 and
         18 <= adx <= 25 and
         ivr <= 40 and
@@ -34,51 +90,16 @@ def classify_strategy(price, rsi, adx, ivr, vwap, bb_pos, atr):
         0.25 <= bb_pos <= 0.45):
         return "BEAR PUT DEBIT SPREAD", "Mild bearish: RSI 35–45, ADX 18–25, low IVR, price below VWAP."
 
-    # 4. Diagonal Spread
     if (50 <= rsi <= 60 and
         15 <= adx <= 25 and
         ivr <= 35 and
         0.45 <= bb_pos <= 0.65):
         return "DIAGONAL SPREAD", "Slight trend with low IV: RSI 50–60, ADX 15–25, low IVR."
 
-    # 5. No Trade
     return "NO TRADE", "Environment does not match any high‑probability setup."
 
 # ============================================================
-# ==================  TAB 1: ENTRY ENGINE  ===================
-# ============================================================
-
-with tabs[0]:
-    st.header("Strategy Entry Engine")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        e_price = st.number_input("Underlying Price", value=999.66, step=0.1, key="e_price")
-        e_rsi = st.number_input("RSI", value=56.36, step=0.1, key="e_rsi")
-        e_adx = st.number_input("ADX", value=20.60, step=0.1, key="e_adx")
-        e_ivr = st.number_input("IVR", value=23.0, step=0.1, key="e_ivr")
-    with col2:
-        e_vwap = st.number_input("VWAP", value=997.99, step=0.1, key="e_vwap")
-        e_bbh = st.number_input("BB High", value=1008.88, step=0.1, key="e_bbh")
-        e_bbl = st.number_input("BB Low", value=980.90, step=0.1, key="e_bbl")
-        e_atr = st.number_input("ATR", value=5.78, step=0.1, key="e_atr")
-
-    if e_bbh != e_bbl:
-        e_bb_pos = (e_price - e_bbl) / (e_bbh - e_bbl)
-    else:
-        e_bb_pos = 0.5
-
-    st.markdown(f"**BB Position (0–1):** `{e_bb_pos:.2f}`")
-
-    if st.button("Classify Strategy", key="classify_btn"):
-        strat, reason = classify_strategy(e_price, e_rsi, e_adx, e_ivr, e_vwap, e_bb_pos, e_atr)
-        st.subheader("Recommended Strategy")
-        st.success(strat)
-        st.subheader("Reason")
-        st.write(reason)
-
-# ============================================================
-# ============  TAB 2: BULL CALL EXIT ENGINE  ================
+# ==================  EXIT ENGINES  ==========================
 # ============================================================
 
 def decide_bull_call_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
@@ -102,37 +123,6 @@ def decide_bull_call_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
         return "HOLD: Environment ideal for bull call spread – stay in the trade."
     return "HOLD: No exit signal, but environment not ideal – monitor closely."
 
-with tabs[1]:
-    st.header("Bull Call Debit Spread – Exit Engine")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        bc_price = st.number_input("Underlying Price", value=999.66, step=0.1, key="bc_price")
-        bc_rsi = st.number_input("RSI", value=56.36, step=0.1, key="bc_rsi")
-        bc_adx = st.number_input("ADX", value=20.60, step=0.1, key="bc_adx")
-        bc_ivr = st.number_input("IVR", value=23.0, step=0.1, key="bc_ivr")
-    with col2:
-        bc_vwap = st.number_input("VWAP", value=997.99, step=0.1, key="bc_vwap")
-        bc_bbh = st.number_input("BB High", value=1008.88, step=0.1, key="bc_bbh")
-        bc_bbl = st.number_input("BB Low", value=980.90, step=0.1, key="bc_bbl")
-        bc_pnl = st.number_input("Current P/L % on Spread", value=16.0, step=1.0, key="bc_pnl")
-
-    if bc_bbh != bc_bbl:
-        bc_bb_pos = (bc_price - bc_bbl) / (bc_bbh - bc_bbl)
-    else:
-        bc_bb_pos = 0.5
-
-    st.markdown(f"**BB Position (0–1):** `{bc_bb_pos:.2f}`")
-
-    if st.button("Evaluate Bull Call Exit", key="bc_btn"):
-        decision = decide_bull_call_exit(bc_price, bc_rsi, bc_adx, bc_ivr, bc_vwap, bc_bb_pos, bc_pnl)
-        st.subheader("Decision")
-        st.success(decision)
-
-# ============================================================
-# ============  TAB 3: CALENDAR EXIT ENGINE  =================
-# ============================================================
-
 def decide_calendar_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
     if pnl_pct <= -30:
         return "EXIT: Stop loss hit (≤ -30%)"
@@ -154,19 +144,156 @@ def decide_calendar_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
         return "HOLD: Ideal neutral environment for calendar – stay in the trade."
     return "HOLD: No exit signal, but environment not ideal – monitor closely."
 
-with tabs[2]:
-    st.header("Calendar Spread – Exit Engine")
+# ============================================================
+# ==================  SIDEBAR: TICKER & FETCH  ===============
+# ============================================================
+
+st.sidebar.header("Data Source")
+ticker = st.sidebar.text_input("Ticker", value="COST")
+auto_fetch = st.sidebar.button("Fetch latest metrics")
+
+if "metrics" not in st.session_state:
+    st.session_state.metrics = None
+if "fetch_error" not in st.session_state:
+    st.session_state.fetch_error = None
+
+if auto_fetch:
+    metrics, err = fetch_metrics(ticker)
+    st.session_state.metrics = metrics
+    st.session_state.fetch_error = err
+
+if st.session_state.fetch_error:
+    st.sidebar.error(f"Fetch error: {st.session_state.fetch_error}")
+elif st.session_state.metrics:
+    m = st.session_state.metrics
+    st.sidebar.success("Metrics fetched")
+    st.sidebar.write(
+        f"Price: {m['price']:.2f}\n\n"
+        f"RSI: {m['rsi']:.2f}\n\n"
+        f"ADX: {m['adx']:.2f}\n\n"
+        f"ATR: {m['atr']:.2f}\n\n"
+        f"VWAP: {m['vwap']:.2f}\n\n"
+        f"BBL: {m['bbl']:.2f}\n\n"
+        f"BBH: {m['bbh']:.2f}\n\n"
+        f"BB Pos: {m['bb_pos']:.2f}"
+    )
+
+tabs = st.tabs(["Strategy Entry Engine", "Bull Call Exit Engine", "Calendar Exit Engine"])
+
+# ============================================================
+# ==================  TAB 1: ENTRY ENGINE  ===================
+# ============================================================
+
+with tabs[0]:
+    st.header("Strategy Entry Engine")
+
+    base = st.session_state.metrics or {
+        "price": 999.66,
+        "rsi": 56.36,
+        "adx": 20.60,
+        "atr": 5.78,
+        "vwap": 997.99,
+        "bbh": 1008.88,
+        "bbl": 980.90,
+        "bb_pos": 0.6,
+    }
 
     col1, col2 = st.columns(2)
     with col1:
-        cal_price = st.number_input("Underlying Price", value=331.15, step=0.1, key="cal_price")
-        cal_rsi = st.number_input("RSI", value=53.91, step=0.1, key="cal_rsi")
-        cal_adx = st.number_input("ADX", value=20.0, step=0.1, key="cal_adx")
-        cal_ivr = st.number_input("IVR", value=62.0, step=0.1, key="cal_ivr")
+        e_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1, key="e_price")
+        e_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1, key="e_rsi")
+        e_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1, key="e_adx")
+        e_ivr = st.number_input("IVR (manual for now)", value=30.0, step=1.0, key="e_ivr")
     with col2:
-        cal_vwap = st.number_input("VWAP", value=330.50, step=0.1, key="cal_vwap")
-        cal_bbh = st.number_input("BB High", value=334.50, step=0.1, key="cal_bbh")
-        cal_bbl = st.number_input("BB Low", value=325.55, step=0.1, key="cal_bbl")
+        e_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1, key="e_vwap")
+        e_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1, key="e_bbh")
+        e_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1, key="e_bbl")
+        e_atr = st.number_input("ATR", value=float(base["atr"]), step=0.1, key="e_atr")
+
+    if e_bbh != e_bbl:
+        e_bb_pos = (e_price - e_bbl) / (e_bbh - e_bbl)
+    else:
+        e_bb_pos = 0.5
+
+    st.markdown(f"**BB Position (0–1):** `{e_bb_pos:.2f}`")
+
+    if st.button("Classify Strategy", key="classify_btn"):
+        strat, reason = classify_strategy(e_price, e_rsi, e_adx, e_ivr, e_vwap, e_bb_pos, e_atr)
+        st.subheader("Recommended Strategy")
+        st.success(strat)
+        st.subheader("Reason")
+        st.write(reason)
+
+# ============================================================
+# ============  TAB 2: BULL CALL EXIT ENGINE  ================
+# ============================================================
+
+with tabs[1]:
+    st.header("Bull Call Debit Spread – Exit Engine")
+
+    base = st.session_state.metrics or {
+        "price": 999.66,
+        "rsi": 56.36,
+        "adx": 20.60,
+        "atr": 5.78,
+        "vwap": 997.99,
+        "bbh": 1008.88,
+        "bbl": 980.90,
+        "bb_pos": 0.6,
+    }
+
+    col1, col2 = st.columns(2)
+    with col1:
+        bc_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1, key="bc_price")
+        bc_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1, key="bc_rsi")
+        bc_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1, key="bc_adx")
+        bc_ivr = st.number_input("IVR (manual)", value=23.0, step=1.0, key="bc_ivr")
+    with col2:
+        bc_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1, key="bc_vwap")
+        bc_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1, key="bc_bbh")
+        bc_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1, key="bc_bbl")
+        bc_pnl = st.number_input("Current P/L % on Spread", value=16.0, step=1.0, key="bc_pnl")
+
+    if bc_bbh != bc_bbl:
+        bc_bb_pos = (bc_price - bc_bbl) / (bc_bbh - bc_bbl)
+    else:
+        bc_bb_pos = 0.5
+
+    st.markdown(f"**BB Position (0–1):** `{bc_bb_pos:.2f}`")
+
+    if st.button("Evaluate Bull Call Exit", key="bc_btn"):
+        decision = decide_bull_call_exit(bc_price, bc_rsi, bc_adx, bc_ivr, bc_vwap, bc_bb_pos, bc_pnl)
+        st.subheader("Decision")
+        st.success(decision)
+
+# ============================================================
+# ============  TAB 3: CALENDAR EXIT ENGINE  =================
+# ============================================================
+
+with tabs[2]:
+    st.header("Calendar Spread – Exit Engine")
+
+    base = st.session_state.metrics or {
+        "price": 331.15,
+        "rsi": 53.91,
+        "adx": 20.0,
+        "atr": 4.0,
+        "vwap": 330.50,
+        "bbh": 334.50,
+        "bbl": 325.55,
+        "bb_pos": 0.5,
+    }
+
+    col1, col2 = st.columns(2)
+    with col1:
+        cal_price = st.number_input("Underlying Price", value=float(base["price"]), step=0.1, key="cal_price")
+        cal_rsi = st.number_input("RSI", value=float(base["rsi"]), step=0.1, key="cal_rsi")
+        cal_adx = st.number_input("ADX", value=float(base["adx"]), step=0.1, key="cal_adx")
+        cal_ivr = st.number_input("IVR (manual)", value=62.0, step=1.0, key="cal_ivr")
+    with col2:
+        cal_vwap = st.number_input("VWAP", value=float(base["vwap"]), step=0.1, key="cal_vwap")
+        cal_bbh = st.number_input("BB High", value=float(base["bbh"]), step=0.1, key="cal_bbh")
+        cal_bbl = st.number_input("BB Low", value=float(base["bbl"]), step=0.1, key="cal_bbl")
         cal_pnl = st.number_input("Current P/L % on Calendar", value=-5.0, step=1.0, key="cal_pnl")
 
     if cal_bbh != cal_bbl:
