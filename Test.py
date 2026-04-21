@@ -1,198 +1,117 @@
-import math
-import pandas as pd
 import streamlit as st
-import time
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, time as dt_time
-import pytz
+st.set_page_config(page_title="Options Strategy Engine", layout="wide")
 
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import (
-    StockLatestTradeRequest,
-    StockLatestBarRequest,
-)
+st.title("Options Strategy Exit Engine")
 
-# =========================
-# CONFIG
-# =========================
+tabs = st.tabs(["Bull Call Debit Spread", "Calendar Spread"])
 
-ALPACA_API_KEY =
-ALPACA_SECRET_KEY =
+# ============================================================
+# ==================  BULL CALL EXIT ENGINE  ==================
+# ============================================================
 
-alpaca = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+with tabs[0]:
+    st.header("Bull Call Debit Spread – Exit Engine")
 
-# =========================
-# LOAD TICKERS
-# =========================
+    col1, col2 = st.columns(2)
+    with col1:
+        price = st.number_input("Underlying Price", value=999.66, step=0.1, key="bc_price")
+        rsi = st.number_input("RSI", value=56.36, step=0.1, key="bc_rsi")
+        adx = st.number_input("ADX", value=20.60, step=0.1, key="bc_adx")
+        ivr = st.number_input("IVR", value=23.0, step=0.1, key="bc_ivr")
 
-def load_universe_from_file(path="tickers.txt"):
-    try:
-        with open(path, "r") as f:
-            return [
-                line.strip().upper()
-                for line in f
-                if line.strip() and not line.startswith("#")
-            ]
-    except:
-        return []
+    with col2:
+        vwap = st.number_input("VWAP", value=997.99, step=0.1, key="bc_vwap")
+        bbh = st.number_input("BB High", value=1008.88, step=0.1, key="bc_bbh")
+        bbl = st.number_input("BB Low", value=980.90, step=0.1, key="bc_bbl")
+        pnl_pct = st.number_input("Current P/L % on Spread", value=16.0, step=1.0, key="bc_pnl")
 
-UNIVERSE = load_universe_from_file()
+    # Compute BB position
+    bb_pos = (price - bbl) / (bbh - bbl) if bbh != bbl else 0.5
+    st.markdown(f"**BB Position (0–1):** `{bb_pos:.2f}`")
 
-# =========================
-# MARKET SESSION (FIXED)
-# =========================
+    def decide_bull_call_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
+        if pnl_pct <= -30:
+            return "EXIT: Stop loss hit (≤ -30%)"
+        if pnl_pct >= 25:
+            return "EXIT: Take profit (≥ +25%)"
+        if pnl_pct > 0:
+            if rsi > 65:
+                return "EXIT: Take profit early (RSI > 65)"
+            if adx > 25:
+                return "EXIT: Take profit early (ADX > 25)"
+            if price < vwap:
+                return "EXIT: Take profit early (price < VWAP)"
+            if bb_pos >= 0.9:
+                return "EXIT: Take profit early (near upper Bollinger Band)"
+        if (50 <= rsi <= 60 and
+            18 <= adx <= 23 and
+            price > vwap and
+            0.55 <= bb_pos <= 0.75):
+            return "HOLD: Environment ideal for bull call spread – stay in the trade."
+        return "HOLD: No exit signal, but environment not ideal – monitor closely."
 
-def get_market_session():
-    est = pytz.timezone("US/Eastern")
-    now = datetime.now(est)
+    if st.button("Evaluate Bull Call Exit"):
+        decision = decide_bull_call_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct)
+        st.subheader("Decision")
+        st.success(decision)
 
-    t = now.time()
-    d = now.weekday()
 
-    if d >= 5:
-        return "Closed"
+# ============================================================
+# ==================  CALENDAR EXIT ENGINE  ==================
+# ============================================================
 
-    if dt_time(4, 0) <= t < dt_time(9, 30):
-        return "Premarket"
-    elif dt_time(9, 30) <= t < dt_time(16, 0):
-        return "Open"
-    elif dt_time(16, 0) <= t < dt_time(20, 0):
-        return "After Hours"
-    else:
-        return "Closed"
+with tabs[1]:
+    st.header("Calendar Spread – Exit Engine")
 
-# =========================
-# DATA FETCH (RETRY SAFE)
-# =========================
+    col1, col2 = st.columns(2)
+    with col1:
+        c_price = st.number_input("Underlying Price", value=331.15, step=0.1, key="cal_price")
+        c_rsi = st.number_input("RSI", value=53.91, step=0.1, key="cal_rsi")
+        c_adx = st.number_input("ADX", value=20.0, step=0.1, key="cal_adx")
+        c_ivr = st.number_input("IVR", value=62.0, step=0.1, key="cal_ivr")
 
-def fetch_alpaca_realtime(ticker: str, retries=2):
-    for _ in range(retries):
-        try:
-            trade = alpaca.get_stock_latest_trade(
-                StockLatestTradeRequest(symbol_or_symbols=ticker)
-            )[ticker]
+    with col2:
+        c_vwap = st.number_input("VWAP", value=330.50, step=0.1, key="cal_vwap")
+        c_bbh = st.number_input("BB High", value=334.50, step=0.1, key="cal_bbh")
+        c_bbl = st.number_input("BB Low", value=325.55, step=0.1, key="cal_bbl")
+        c_pnl_pct = st.number_input("Current P/L % on Calendar", value=-5.0, step=1.0, key="cal_pnl")
 
-            bar = alpaca.get_stock_latest_bar(
-                StockLatestBarRequest(symbol_or_symbols=ticker)
-            )[ticker]
+    # Compute BB position
+    c_bb_pos = (c_price - c_bbl) / (c_bbh - c_bbl) if c_bbh != c_bbl else 0.5
+    st.markdown(f"**BB Position (0–1):** `{c_bb_pos:.2f}`")
 
-            return float(trade.price), float(bar.close), int(bar.volume)
+    def decide_calendar_exit(price, rsi, adx, ivr, vwap, bb_pos, pnl_pct):
+        # Stop loss
+        if pnl_pct <= -30:
+            return "EXIT: Stop loss hit (≤ -30%)"
 
-        except Exception:
-            time.sleep(0.2)
+        # Take profit
+        if pnl_pct >= 25:
+            return "EXIT: Take profit (≥ +25%)"
 
-    return None, None, None
+        # Early exit if environment breaks neutrality
+        if rsi > 60:
+            return "EXIT: RSI > 60 (momentum breaking neutrality)"
+        if rsi < 40:
+            return "EXIT: RSI < 40 (momentum breaking neutrality)"
+        if adx > 25:
+            return "EXIT: ADX > 25 (trend forming – bad for calendars)"
+        if price > vwap + 2:
+            return "EXIT: Price breaking above VWAP (trend forming)"
+        if price < vwap - 2:
+            return "EXIT: Price breaking below VWAP (trend forming)"
 
-# =========================
-# CALCULATIONS
-# =========================
+        # Ideal hold zone
+        if (45 <= rsi <= 55 and
+            adx < 20 and
+            0.3 <= bb_pos <= 0.7):
+            return "HOLD: Ideal neutral environment for calendar – stay in the trade."
 
-def compute_gap(price, prev):
-    if not price or not prev:
-        return None
-    return (price - prev) / prev * 100
+        # Default
+        return "HOLD: No exit signal, but environment not ideal – monitor closely."
 
-def compute_momentum(gap, vol):
-    if gap is None or vol is None:
-        return None
-    return gap * math.log(vol + 1)
-
-# =========================
-# PROCESS
-# =========================
-
-def process_ticker(t):
-    price, prev, vol = fetch_alpaca_realtime(t)
-
-    if price is None:
-        return None
-
-    gap = compute_gap(price, prev)
-    momentum = compute_momentum(gap, vol)
-
-    return {
-        "Ticker": t,
-        "Price": price,
-        "Gap %": round(gap, 2) if gap else None,
-        "Momentum": round(momentum, 2) if momentum else None,
-        "Volume": vol,
-    }
-
-# =========================
-# SCANNER (STABLE)
-# =========================
-
-def scan_universe(tickers):
-    rows = []
-
-    max_threads = min(10, len(tickers))  # lower = more stable
-
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        futures = {executor.submit(process_ticker, t): t for t in tickers}
-
-        for future in as_completed(futures):
-            try:
-                result = future.result(timeout=5)
-                if result:
-                    rows.append(result)
-            except:
-                continue
-
-    return pd.DataFrame(rows)
-
-# =========================
-# UI
-# =========================
-
-def main():
-    st.set_page_config(layout="wide")
-    st.title("🚀 Stable Momentum Scanner")
-
-    # SESSION DISPLAY
-    session = get_market_session()
-
-    st.write(f"**Session:** {session}")
-
-    if session == "Premarket":
-        st.info("📈 Premarket")
-    elif session == "Open":
-        st.success("🟢 Market Open")
-    elif session == "After Hours":
-        st.warning("🌙 After Hours")
-    else:
-        st.error("🔴 Market Closed")
-
-    # SIDEBAR
-    min_gap = st.sidebar.number_input("Min Gap %", 0.0, 20.0, 3.0)
-    min_vol = st.sidebar.number_input("Min Volume", 0, 5000000, 500000)
-
-    # BUTTON
-    if st.button("Run Scan"):
-
-        st.write("Scanning...")
-
-        df = scan_universe(UNIVERSE)
-
-        if df.empty:
-            st.warning("No data returned (likely API or rate limit issue)")
-            return
-
-        df = df[
-            (df["Gap %"] >= min_gap) &
-            (df["Volume"] >= min_vol)
-        ]
-
-        if df.empty:
-            st.warning("No tickers matched filters")
-            return
-
-        df = df.sort_values("Momentum", ascending=False)
-
-        st.dataframe(df, use_container_width=True)
-        st.success(f"{len(df)} results")
-
-# =========================
-
-if __name__ == "__main__":
-    main()
+    if st.button("Evaluate Calendar Exit"):
+        decision = decide_calendar_exit(c_price, c_rsi, c_adx, c_ivr, c_vwap, c_bb_pos, c_pnl_pct)
+        st.subheader("Decision")
+        st.success(decision)
