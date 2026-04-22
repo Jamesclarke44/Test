@@ -1,5 +1,6 @@
 """
-Teat.py - Trading Scanner for Finding High-Probability Setups
+Test.py - Trading Scanner for Finding High-Probability Setups
+Fixed: applymap → map for pandas 2.0+ compatibility
 Run with: streamlit run Test.py
 """
 
@@ -512,13 +513,13 @@ if scan_button:
         display_df.columns = ['Ticker', 'Price', 'Change %', 'Vol Ratio', 
                              'ATR %', 'RSI', 'Trend', 'Dist to Sup %', 'Score']
         
-        # Apply styling
+        # Apply styling - FIXED: using map instead of applymap
         def style_trend(val):
             if val in ['strong_uptrend', 'uptrend']:
                 return 'color: #22c55e; font-weight: 600'
             elif val in ['strong_downtrend', 'downtrend']:
                 return 'color: #ef4444; font-weight: 600'
-            return 'color: #f59e0b'
+            return 'color: #f59e0b; font-weight: 600'
         
         def style_score(val):
             if val >= 8:
@@ -527,8 +528,8 @@ if scan_button:
                 return 'background-color: #f59e0b; color: white; padding: 4px 8px; border-radius: 12px;'
             return 'background-color: #ef4444; color: white; padding: 4px 8px; border-radius: 12px;'
         
-        styled_df = display_df.style.applymap(style_trend, subset=['Trend'])\
-                                  .applymap(style_score, subset=['Score'])\
+        styled_df = display_df.style.map(style_trend, subset=['Trend'])\
+                                  .map(style_score, subset=['Score'])\
                                   .format({
                                       'Price': '${:.2f}',
                                       'Change %': '{:+.2f}%',
