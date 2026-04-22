@@ -112,3 +112,4 @@ current_price = float(df['Close'].iloc[-1])  # ❌ Fails
 # Fixed code:
 current_price = safe_scalar(df['Close'].iloc[-1])  # ✅ Works
     """)
+    
