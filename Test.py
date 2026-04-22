@@ -1,6 +1,6 @@
 """
 Test.py - Trading Scanner for Finding High-Probability Setups
-FULLY FIXED: Robust MultiIndex handling, session state, relaxed defaults
+FULLY FIXED: Expanded watchlists, Scan All option, Robust MultiIndex handling
 Run with: streamlit run Test.py
 """
 
@@ -57,13 +57,11 @@ def get_column(df, col_name):
     if df.empty:
         return None
     if isinstance(df.columns, pd.MultiIndex):
-        # Try to find column at any level
         col_name_lower = col_name.lower()
         for i, col_tuple in enumerate(df.columns):
             if any(str(c).lower() == col_name_lower for c in col_tuple):
                 return df.iloc[:, i]
         return None
-    # Regular columns
     for col in df.columns:
         if col.lower() == col_name.lower():
             return df[col]
@@ -261,15 +259,92 @@ class StockScanner:
         return results
 
 # ============================================================================
-# DEFAULT WATCHLISTS
+# EXPANDED DEFAULT WATCHLISTS (400+ tickers)
 # ============================================================================
 
 DEFAULT_WATCHLISTS = {
-    "Major ETFs": ["SPY", "QQQ", "IWM", "DIA", "TLT", "GLD"],
-    "Tech Giants": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA"],
-    "Semiconductors": ["NVDA", "AMD", "INTC", "AVGO", "TXN", "QCOM"],
-    "High Volume": ["AAPL", "TSLA", "NVDA", "AMD", "AMZN", "META", "MSFT", "PLTR"],
-    "Swing Trading": ["AAPL", "MSFT", "NVDA", "TSLA", "META", "AMZN", "GOOGL"],
+    "Major ETFs": [
+        "SPY", "QQQ", "IWM", "DIA", "TLT", "GLD", "SLV", "USO", "XLF", "XLK",
+        "XLV", "XLI", "XLE", "XLP", "XLY", "XLU", "XLB", "XME", "XRT", "XHB",
+        "SMH", "SOXX", "IBB", "XBI", "ARKK"
+    ],
+    
+    "Tech Giants": [
+        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX", "ADBE", "CRM",
+        "ORCL", "IBM", "CSCO", "INTC", "AMD", "QCOM", "TXN", "AVGO", "MU", "AMAT",
+        "LRCX", "KLAC", "SNPS", "CDNS", "ADSK", "NOW", "WDAY", "TEAM", "DDOG", "CRWD"
+    ],
+    
+    "Semiconductors": [
+        "NVDA", "AMD", "INTC", "AVGO", "TXN", "QCOM", "MU", "AMAT", "LRCX", "KLAC",
+        "ASML", "TSM", "ADI", "MCHP", "ON", "STM", "NXPI", "MPWR", "MRVL", "SWKS",
+        "QRVO", "TER", "ENTG", "ACLS", "FORM", "COHR", "IPGP", "LSCC", "SIMO", "SLAB"
+    ],
+    
+    "Financials": [
+        "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "SCHW", "AXP", "V",
+        "MA", "PYPL", "SQ", "COIN", "BX", "KKR", "APO", "ARES", "CG", "TPG",
+        "BEN", "TROW", "STT", "BK", "NTRS", "AMP", "RJF", "SF", "EVR", "LAZ"
+    ],
+    
+    "Healthcare": [
+        "JNJ", "PFE", "MRK", "ABBV", "LLY", "TMO", "DHR", "ABT", "BMY", "AMGN",
+        "GILD", "BIIB", "REGN", "VRTX", "MRNA", "ISRG", "EW", "BSX", "SYK", "ZBH",
+        "HCA", "UHS", "CI", "UNH", "CVS", "ANTM", "HUM", "CNC", "MOH", "ALGN"
+    ],
+    
+    "Consumer": [
+        "WMT", "AMZN", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW", "COST", "TJX",
+        "ROST", "BURL", "DG", "DLTR", "FIVE", "ULTA", "LULU", "DECK", "CROX", "YETI",
+        "PG", "KO", "PEP", "CL", "EL", "CLX", "CHD", "KMB", "HSY", "MDLZ"
+    ],
+    
+    "Energy": [
+        "XOM", "CVX", "COP", "SLB", "EOG", "PXD", "OXY", "MPC", "VLO", "PSX",
+        "HAL", "BKR", "FANG", "DVN", "MRO", "APA", "HES", "CTRA", "EQT", "RRC",
+        "WMB", "KMI", "OKE", "ENB", "EPD", "ET", "MMP", "PAA", "SUN", "LNG"
+    ],
+    
+    "High Volume Stocks": [
+        "AAPL", "TSLA", "NVDA", "AMD", "AMZN", "META", "MSFT", "GOOGL", "NFLX", "PLTR",
+        "SOFI", "RIVN", "LCID", "MARA", "RIOT", "COIN", "GME", "AMC", "TQQQ", "SQQQ",
+        "SOXL", "SOXS", "SPY", "QQQ", "IWM", "TLT", "HYG", "LQD", "NVDA", "AAPL"
+    ],
+    
+    "Swing Trading Favorites": [
+        "AAPL", "MSFT", "NVDA", "TSLA", "META", "AMZN", "GOOGL", "AMD", "NFLX", "CRM",
+        "ADBE", "NOW", "SNOW", "DDOG", "CRWD", "ZS", "NET", "MDB", "PLTR", "SOFI",
+        "UBER", "LYFT", "ABNB", "SHOP", "SQ", "PYPL", "COIN", "RBLX", "U", "PATH"
+    ],
+    
+    "Volatile Stocks": [
+        "TSLA", "NVDA", "AMD", "PLTR", "COIN", "RIVN", "LCID", "MARA", "RIOT", "GME",
+        "AMC", "MSTR", "AI", "UPST", "AFRM", "HOOD", "W", "CHWY", "CVNA", "WOLF",
+        "ENPH", "SEDG", "FSLR", "SPWR", "RUN", "NOVA", "MAXN", "ARRY", "SHLS", "STEM"
+    ],
+    
+    "AI & Software": [
+        "MSFT", "GOOGL", "META", "NVDA", "ADBE", "CRM", "NOW", "SNOW", "PLTR", "AI",
+        "PATH", "U", "TEAM", "WDAY", "ZM", "DOCU", "CRWD", "ZS", "NET", "DDOG",
+        "MDB", "ESTC", "SPLK", "DT", "FROG", "GTLB", "CFLT", "BRZE", "PD", "ASAN"
+    ],
+    
+    "Crypto-Related": [
+        "COIN", "MARA", "RIOT", "MSTR", "SQ", "PYPL", "HOOD", "CLSK", "HUT", "BITF",
+        "BTBT", "WULF", "IREN", "CIFR", "SDIG", "ARBK", "CORZ", "DGHI", "BTCM", "MIGI"
+    ],
+    
+    "Dividend Aristocrats": [
+        "JNJ", "PG", "KO", "PEP", "WMT", "MCD", "MMM", "CAT", "DE", "LOW",
+        "HD", "TGT", "CL", "CLX", "KMB", "BEN", "TROW", "ABBV", "ABT", "CVX",
+        "XOM", "O", "SPG", "PLD", "AVB", "EQR", "ESS", "MAA", "UDR", "CPT"
+    ],
+    
+    "Small Cap Growth": [
+        "SMCI", "CELH", "ELF", "WING", "TXG", "PGNY", "FND", "W", "CHWY", "CVNA",
+        "UPST", "AFRM", "SOFI", "HOOD", "RKLB", "ASTS", "IONQ", "QBTS", "RGTI", "QUBT",
+        "ACHR", "JOBY", "EVTL", "BLDE", "LILM", "EH", "PL", "MVST", "SLDP", "QS"
+    ]
 }
 
 # ============================================================================
@@ -305,8 +380,20 @@ with st.sidebar:
     st.subheader("📋 Watchlist")
     watchlist_option = st.selectbox("Select Watchlist", list(DEFAULT_WATCHLISTS.keys()) + ["Custom"])
     
-    if watchlist_option == "Custom":
-        custom_tickers = st.text_area("Enter tickers", value="AAPL, MSFT, NVDA, TSLA", height=100)
+    st.divider()
+    
+    # Option to scan all watchlists combined
+    scan_all_watchlists = st.checkbox("🔍 Scan ALL Watchlists Combined", value=False)
+    
+    if scan_all_watchlists:
+        # Combine all tickers from all watchlists
+        all_tickers = set()
+        for name, tlist in DEFAULT_WATCHLISTS.items():
+            all_tickers.update(tlist)
+        tickers = list(all_tickers)
+        st.success(f"🎯 Scanning ALL {len(tickers)} tickers across all watchlists!")
+    elif watchlist_option == "Custom":
+        custom_tickers = st.text_area("Enter tickers", value="AAPL, MSFT, NVDA, TSLA, AMZN, GOOGL, META", height=100)
         tickers = [t.strip().upper() for t in custom_tickers.replace(',', ' ').split() if t.strip()]
     else:
         tickers = DEFAULT_WATCHLISTS[watchlist_option]
@@ -453,14 +540,14 @@ if scan_button:
                               file_name=f"{detail['ticker']}_setup.json",
                               mime="application/json", key=f"export_{detail['ticker']}")
     else:
-        st.warning("⚠️ No setups found. Try relaxing filters further.")
+        st.warning("⚠️ No setups found. Try relaxing filters further or check 'Scan ALL Watchlists Combined'.")
 
 else:
     st.info("👈 Configure scan criteria and click 'Run Scanner' to begin")
     st.markdown("""
     ### 📋 Quick Start
-    1. Select a watchlist (try "Tech Giants")
-    2. Click "Run Scanner"
+    1. ✅ Check **'Scan ALL Watchlists Combined'** for maximum results
+    2. Click **'Run Scanner'**
     3. Review results sorted by score
     4. Click any ticker for details
     """)
