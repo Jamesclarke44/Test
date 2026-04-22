@@ -1,6 +1,7 @@
 """
 Test.py - Trading Scanner for Finding High-Probability Setups
 Fixed: applymap → map for pandas 2.0+ compatibility
+Fixed: Session state for persistent detailed view
 Run with: streamlit run Test.py
 """
 
@@ -462,6 +463,12 @@ st.markdown('<h1 class="scan-header">🔍 Trading Scanner</h1>', unsafe_allow_ht
 st.caption("Find high-probability setups based on technical criteria")
 
 if scan_button:
+    # Clear previous session state when new scan is run
+    if 'scan_results' in st.session_state:
+        del st.session_state.scan_results
+    if 'selected_ticker' in st.session_state:
+        del st.session_state.selected_ticker
+    
     # Build criteria dict
     criteria = {
         'min_price': min_price,
@@ -483,6 +490,9 @@ if scan_button:
     
     if results:
         st.success(f"✅ Found {len(results)} setups matching criteria")
+        
+        # Store results in session state
+        st.session_state.scan_results = results
         
         # Convert to DataFrame for display
         df_results = pd.DataFrame(results)
@@ -541,17 +551,38 @@ if scan_button:
         
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
-        # Detailed view for selected ticker
+        # ======================================================================
+        # DETAILED VIEW WITH SESSION STATE (FIXED)
+        # ======================================================================
+        
         st.divider()
         st.subheader("🔎 Detailed View")
         
+        # Create ticker options list from session state
+        ticker_options = [r['ticker'] for r in st.session_state.scan_results]
+        
+        # Initialize selected ticker in session state if not exists
+        if 'selected_ticker' not in st.session_state:
+            st.session_state.selected_ticker = ticker_options[0] if ticker_options else None
+        
+        # Callback to update selected ticker
+        def update_ticker():
+            st.session_state.selected_ticker = st.session_state.ticker_select_widget
+        
+        # Selectbox with callback
         selected_ticker = st.selectbox(
             "Select ticker for detailed analysis",
-            [r['ticker'] for r in results]
+            ticker_options,
+            key='ticker_select_widget',
+            on_change=update_ticker
         )
         
-        if selected_ticker:
-            detail = next(r for r in results if r['ticker'] == selected_ticker)
+        # Use the stored selected ticker
+        current_ticker = st.session_state.selected_ticker
+        
+        if current_ticker and current_ticker in [r['ticker'] for r in st.session_state.scan_results]:
+            # Find the detail dict for the selected ticker
+            detail = next(r for r in st.session_state.scan_results if r['ticker'] == current_ticker)
             
             col1, col2, col3 = st.columns(3)
             
@@ -619,6 +650,8 @@ if scan_button:
                         f"${sma200:.2f}",
                         delta=f"{'Above' if above200 else 'Below'} by ${abs(price - sma200):.2f}"
                     )
+                else:
+                    st.metric("200 SMA", "N/A")
             
             # Volume Analysis
             st.markdown("### 📊 Volume Analysis")
@@ -695,7 +728,8 @@ if scan_button:
                 label=f"📥 Export {detail['ticker']} Setup",
                 data=json.dumps(export_data, indent=2),
                 file_name=f"{detail['ticker']}_setup_{datetime.now().strftime('%Y%m%d')}.json",
-                mime="application/json"
+                mime="application/json",
+                key=f"export_{detail['ticker']}"
             )
     
     else:
@@ -717,7 +751,7 @@ else:
        - Volatility parameters
     3. **Click 'Run Scanner'** to find matching setups
     4. **Review results** sorted by quality score
-    5. **Click any ticker** for detailed analysis
+    5. **Select any ticker** from the dropdown for detailed analysis
     6. **Export setups** for further analysis in the Exit Strategy Command Center
     
     ### 🎯 What Makes a Good Setup?
