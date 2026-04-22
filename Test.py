@@ -1,4 +1,19 @@
 """
+1_🔍_Scanner.py - Trading Scanner
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from datetime import datetime, timedelta
+import json
+from typing import List, Dict, Optional, Tuple
+
+# ... (keep all your existing Test.py code here) ...
+Test
+
+"""
 Test.py - Trading Scanner - FULLY FIXED
 - Ultra-relaxed default filters
 - Fixed session state for ticker selection
@@ -547,3 +562,21 @@ else:
 
 st.divider()
 st.caption("🔍 Trading Scanner — Find setups. Plan exits. Trade with confidence.")
+
+# Add this function to sync selected ticker to shared state
+def sync_to_shared(ticker, price, support, score):
+    st.session_state.shared_ticker = ticker
+    st.session_state.shared_entry = price
+    st.session_state.shared_support = support
+    st.session_state.shared_stop = support * 0.99
+    st.session_state.shared_score = score
+
+# In the detailed view section, add a button:
+if st.button(f"📤 Use {detail['ticker']} for Analysis", use_container_width=True):
+    sync_to_shared(
+        detail['ticker'], 
+        detail['current_price'], 
+        detail['support'], 
+        detail['score']
+    )
+    st.success(f"✅ {detail['ticker']} loaded! Go to Entry Analyzer.")
