@@ -1,6 +1,6 @@
 """
-scanner.py - Trading Scanner for Finding High-Probability Setups
-Run with: streamlit run scanner.py
+Teat.py - Trading Scanner for Finding High-Probability Setups
+Run with: streamlit run Test.py
 """
 
 import streamlit as st
